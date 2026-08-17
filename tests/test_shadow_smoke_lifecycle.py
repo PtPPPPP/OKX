@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import socket
 import sqlite3
 from collections.abc import AsyncIterator
@@ -147,6 +148,23 @@ def test_shadow_smoke_transport_evidence_is_persisted(tmp_path: Path) -> None:
     assert json.loads(event[0]) == details
 
 
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        pytest.param(ProcessLookupError(), False, id="missing-process"),
+        pytest.param(PermissionError(), True, id="permission-denied"),
+        pytest.param(OSError("unexpected process lookup failure"), True, id="unknown-os-error"),
+    ],
+)
+def test_process_exists_handles_portable_os_errors(error: OSError, expected: bool) -> None:
+    with patch("app.services.shadow_smoke_recovery.os.kill", side_effect=error):
+        assert ShadowSmokeRecoveryService._process_exists(999_999) is expected
+
+
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason="Windows-specific ERROR_INVALID_PARAMETER process-existence semantics",
+)
 def test_windows_missing_process_id_is_not_treated_as_a_live_lock_owner() -> None:
     error = OSError(22, "invalid parameter", None, 87)
     with patch("app.services.shadow_smoke_recovery.os.kill", side_effect=error):
