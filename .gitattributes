@@ -1,0 +1,8 @@
+# Byte-exact repository: disable ALL line-ending conversion.
+#
+# Rationale (Phase 3B): tests pin sha256 hashes over byte-sensitive fixtures
+# (tests/fixtures/vwap/*.csv). Any CRLF<->LF normalization would change those
+# bytes on checkout and break the fresh-clone invariant on other platforms.
+# The repository stores exactly the bytes in the working tree; editors keep
+# whatever line endings each file already uses.
+* -text

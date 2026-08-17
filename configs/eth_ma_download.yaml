@@ -1,0 +1,18 @@
+mode: backtest
+
+market:
+  instrument_id: ETH-USDT
+  instrument_type: spot
+  bar: 15m
+
+strategy:
+  name: moving_average_cross
+  parameters:
+    fast_period: 10
+    slow_period: 30
+
+data:
+  source: okx
+  limit: 200
+  output: data/eth_usdt_15m.csv
+

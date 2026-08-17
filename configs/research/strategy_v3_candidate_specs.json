@@ -1,0 +1,78 @@
+{
+  "research_id": "STRATEGY_RESEARCH_V3",
+  "frozen_before_oos": true,
+  "research_cutoff": "2026-08-12T23:59:59.999999+00:00",
+  "prospective_oos_start": "2026-08-13T00:00:00+00:00",
+  "entry_timing": "confirmed 1H candle close signal, next confirmed 1H bar open reference",
+  "episode_definition": "false-to-true starts one episode; continuing true remains one episode",
+  "lookahead_bias": false,
+  "volume_field": "volume",
+  "volume_unit": "BTC base currency quantity for BTC-USDT spot",
+  "candidates": [
+    {
+      "candidate_id": "htf_pullback_recovery",
+      "hypothesis": "A 1H pullback recovery has edge only when the last completed 4H trend is positive.",
+      "economic_rationale": "Higher-timeframe demand can make short-term retracements more likely to resume upward.",
+      "timeframes": ["1H", "4H"],
+      "entry_rule": "completed 4H fast SMA > slow SMA and 1H pullback recovers above its fast SMA",
+      "expected_failure_mode": "HTF context only reduces sample size without improving the 1H pullback edge.",
+      "incremental_controls": ["one_hour_pullback_without_htf"],
+      "variants": [
+        {"variant_id": "htf_pullback_5_12", "parameters": {"htf_fast": 5, "htf_slow": 12, "one_hour_fast": 20, "one_hour_slow": 50}, "primary": true},
+        {"variant_id": "htf_pullback_6_15", "parameters": {"htf_fast": 6, "htf_slow": 15, "one_hour_fast": 24, "one_hour_slow": 60}, "primary": false}
+      ]
+    },
+    {
+      "candidate_id": "htf_breakout",
+      "hypothesis": "Completed 4H trend direction filters false 1H breakouts.",
+      "economic_rationale": "Resistance breaks aligned with broader directional demand may persist more often.",
+      "timeframes": ["1H", "4H"],
+      "entry_rule": "completed 4H fast SMA > slow SMA and 1H close exceeds the previous N-hour high",
+      "expected_failure_mode": "HTF trend lags and removes useful breakouts without improving forward excess.",
+      "incremental_controls": ["one_hour_breakout_without_htf"],
+      "variants": [
+        {"variant_id": "htf_breakout_20", "parameters": {"htf_fast": 5, "htf_slow": 12, "breakout": 20}, "primary": true},
+        {"variant_id": "htf_breakout_40", "parameters": {"htf_fast": 6, "htf_slow": 15, "breakout": 40}, "primary": false}
+      ]
+    },
+    {
+      "candidate_id": "relative_volume_breakout",
+      "hypothesis": "Relative base-volume expansion distinguishes genuine 1H breakouts from weak participation.",
+      "economic_rationale": "A price break supported by increased BTC turnover may reflect broader participation.",
+      "timeframes": ["1H"],
+      "entry_rule": "1H close exceeds previous N-hour high and current base volume exceeds a prior rolling median multiple",
+      "expected_failure_mode": "Volume filtering shrinks the sample but does not improve forward edge.",
+      "incremental_controls": ["one_hour_breakout_without_volume"],
+      "variants": [
+        {"variant_id": "volume_breakout_20", "parameters": {"breakout": 20, "volume_window": 24, "volume_multiple": 1.5}, "primary": true},
+        {"variant_id": "volume_breakout_40", "parameters": {"breakout": 40, "volume_window": 48, "volume_multiple": 1.5}, "primary": false}
+      ]
+    },
+    {
+      "candidate_id": "htf_volume_momentum",
+      "hypothesis": "Positive 1H momentum has edge when both completed 4H direction and participation expansion agree.",
+      "economic_rationale": "Direction, short-term repricing, and participation represent distinct confirming mechanisms.",
+      "timeframes": ["1H", "4H"],
+      "entry_rule": "completed 4H fast SMA > slow SMA, 1H trailing return positive, and relative base volume expanded",
+      "expected_failure_mode": "The combined filters over-condition the sample and create unstable apparent edge.",
+      "incremental_controls": ["without_volume", "without_htf"],
+      "variants": [
+        {"variant_id": "htf_volume_momentum_12", "parameters": {"htf_fast": 5, "htf_slow": 12, "momentum": 12, "volume_window": 24, "volume_multiple": 1.5}, "primary": true},
+        {"variant_id": "htf_volume_momentum_24", "parameters": {"htf_fast": 6, "htf_slow": 15, "momentum": 24, "volume_window": 48, "volume_multiple": 1.5}, "primary": false}
+      ]
+    },
+    {
+      "candidate_id": "volume_exhaustion_reversal",
+      "hypothesis": "Downside displacement mean-reverts only when abnormal volume and confirmed price recovery indicate exhaustion.",
+      "economic_rationale": "High participation during a displaced reversal may mark forced selling exhaustion rather than deviation alone.",
+      "timeframes": ["1H"],
+      "entry_rule": "close below prior rolling mean, bullish recovery above previous close, and relative base volume expanded",
+      "expected_failure_mode": "Abnormal volume accompanies continuation selling rather than exhaustion.",
+      "incremental_controls": ["reversal_without_volume"],
+      "variants": [
+        {"variant_id": "volume_reversal_50", "parameters": {"mean_window": 50, "deviation": 0.02, "volume_window": 24, "volume_multiple": 1.5}, "primary": true},
+        {"variant_id": "volume_reversal_60", "parameters": {"mean_window": 60, "deviation": 0.025, "volume_window": 48, "volume_multiple": 1.5}, "primary": false}
+      ]
+    }
+  ]
+}

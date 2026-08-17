@@ -1,0 +1,47 @@
+mode: demo
+
+exchange:
+  name: okx
+  simulated: true
+
+market:
+  instrument_id: BTC-USDT
+  instrument_type: spot
+  bar: 1m
+
+strategy:
+  name: moving_average_cross
+  acceptance_only: true
+  timeframe: 1m
+  fast_window: 3
+  slow_window: 8
+  safety_buffer: 5
+
+position_sizing:
+  name: fixed_notional
+  parameters:
+    order_notional: 5
+
+risk:
+  max_order_notional: 5
+  max_total_exposure: 10
+  max_daily_loss: 10
+  max_drawdown_pct: 5
+  max_orders_per_minute: 2
+  stale_after_seconds: 60
+
+protective_exits:
+  enabled: false
+
+backtest:
+  initial_capital: 10000
+  fee_rate: 0.001
+  slippage_rate: 0.0005
+
+data:
+  source: okx
+  limit: 100
+  output: data/btc_usdt_demo_acceptance.csv
+
+output:
+  directory: data/results/btc_ma_demo_acceptance

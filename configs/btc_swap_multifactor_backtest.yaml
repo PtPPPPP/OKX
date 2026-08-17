@@ -1,0 +1,21 @@
+environment: backtest
+live_trading: false
+swap_demo_enabled: false
+strategy_profitability_validated: false
+strategy_name: anchored_vwap_multifactor_swap
+market:
+  instrument_id: BTC-USDT-SWAP
+  execution_timeframe: 5m
+  confirmation_timeframes: [15m, 1h]
+risk:
+  leverage: 1
+  risk_fraction_per_trade: 0.005
+  minimum_risk_reward: 1.5
+  maximum_consecutive_losses: 3
+vwap_session_timezone: UTC
+vwap_anchor_hour: 0
+vwap_anchor_minute: 0
+macd_fast: 12
+macd_slow: 26
+macd_signal: 9
+maximum_oi_staleness_minutes: 15

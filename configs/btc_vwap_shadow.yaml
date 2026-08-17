@@ -1,0 +1,20 @@
+mode: demo
+exchange:
+  name: okx
+  simulated: true
+market:
+  instrument_id: BTC-USDT
+  instrument_type: spot
+  bar: 1h
+strategy:
+  name: vwap_shadow
+  parameters:
+    vwap_window: 24
+    buy_deviation_bps: 100
+data:
+  source: csv
+  path: data/btc_usdt_1h_live.csv
+  limit: 119
+  instrument_snapshot: configs/snapshots/BTC-USDT.json
+output:
+  directory: data/results/btc_vwap_shadow

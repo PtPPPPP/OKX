@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "fetched_at": "2026-07-20T15:11:19.510633+00:00",
+  "source": "okx_rest_normalized",
+  "raw": {
+    "instrument_id": "BTC-USDT",
+    "base_currency": "BTC",
+    "quote_currency": "USDT",
+    "instrument_type": "spot",
+    "price_tick": "0.1",
+    "quantity_step": "1E-8",
+    "minimum_quantity": "0.00001",
+    "minimum_notional": "0",
+    "status": "live",
+    "contract_value": null,
+    "settlement_currency": null
+  },
+  "raw_hash": "e714e8d176491d99d45a7b5ab3e41ae84d44113a003596e8445a2c4aacc66f28",
+  "snapshot_hash": "7f5746deb3b2c4de2fb566106db95b6b4cb6903c5a9ab6c638ebd0688feb51cb"
+}

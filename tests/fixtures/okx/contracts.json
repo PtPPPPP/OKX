@@ -1,0 +1,18 @@
+{
+  "server_time": {"code": "0", "msg": "", "data": [{"ts": "1767225600000"}]},
+  "instrument": {"code": "0", "msg": "", "data": [{"instType": "SPOT", "instId": "BTC-USDT", "baseCcy": "BTC", "quoteCcy": "USDT", "tickSz": "0.1", "lotSz": "0.00001", "minSz": "0.00001", "minAmt": "1", "state": "live"}]},
+  "candle_history": {"code": "0", "msg": "", "data": [["1767225600000", "100", "101", "99", "100.5", "12", "1200", "1200", "1"]]},
+  "balance": {"code": "0", "msg": "", "data": [{"uTime": "1767225600000", "details": [{"ccy": "BTC", "availBal": "0.01"}, {"ccy": "USDT", "availBal": "100"}]}]},
+  "pending_orders": {"code": "0", "msg": "", "data": []},
+  "place_order": {"code": "0", "msg": "", "data": [{"clOrdId": "client-1", "ordId": "order-1", "sCode": "0", "sMsg": ""}]},
+  "query_order": {"code": "0", "msg": "", "data": [{"instId": "BTC-USDT", "clOrdId": "client-1", "ordId": "order-1", "side": "buy", "ordType": "limit", "sz": "0.001", "px": "100", "accFillSz": "0", "avgPx": "", "state": "live", "cTime": "1767225600000", "uTime": "1767225600000"}]},
+  "cancel_order": {"code": "0", "msg": "", "data": [{"clOrdId": "client-1", "ordId": "order-1", "sCode": "0", "sMsg": ""}]},
+  "partial_fill": {"instId": "BTC-USDT", "clOrdId": "client-1", "ordId": "order-1", "side": "buy", "ordType": "limit", "sz": "0.001", "px": "100", "accFillSz": "0.0004", "avgPx": "100.1", "state": "partially_filled", "cTime": "1767225600000", "uTime": "1767225601000"},
+  "error_auth": {"code": "50113", "msg": "Invalid Sign", "data": []},
+  "error_rate_limit": {"code": "50011", "msg": "Rate limit reached", "data": []},
+  "ws_candle_unconfirmed": {"arg": {"channel": "candle5m", "instId": "BTC-USDT"}, "data": [["1767225600000", "100", "101", "99", "100.5", "12", "1200", "1200", "0"]]},
+  "ws_candle_confirmed": {"arg": {"channel": "candle5m", "instId": "BTC-USDT"}, "data": [["1767225600000", "100", "101", "99", "100.5", "12", "1200", "1200", "1"]]},
+  "ws_order_partial": {"arg": {"channel": "orders", "instType": "SPOT"}, "data": [{"instId": "BTC-USDT", "clOrdId": "client-1", "ordId": "order-1", "side": "buy", "ordType": "limit", "sz": "0.001", "px": "100", "accFillSz": "0.0004", "avgPx": "100.1", "state": "partially_filled", "fillSz": "0.0004", "fillPx": "100.1", "tradeId": "trade-1", "fee": "-0.00001", "fillTime": "1767225601000", "cTime": "1767225600000", "uTime": "1767225601000"}]},
+  "ws_account": {"arg": {"channel": "account"}, "data": [{"uTime": "1767225601000", "details": [{"ccy": "USDT", "availBal": "99.9"}]}]},
+  "ws_position": {"arg": {"channel": "balance_and_position"}, "data": [{"pTime": "1767225601000", "balData": [], "posData": []}]}
+}

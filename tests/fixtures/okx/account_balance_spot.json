@@ -1,0 +1,25 @@
+{
+  "totalEq": "110",
+  "adjEq": "109",
+  "uTime": "1767225600000",
+  "details": [
+    {
+      "ccy": "BTC",
+      "cashBal": "1",
+      "availBal": "0.4",
+      "frozenBal": "0.6",
+      "eq": "1",
+      "eqUsd": "100",
+      "uTime": "1767225600000"
+    },
+    {
+      "ccy": "USDT",
+      "cashBal": "10",
+      "availBal": "7",
+      "frozenBal": "3",
+      "eq": "10",
+      "eqUsd": "10",
+      "uTime": "1767225600000"
+    }
+  ]
+}

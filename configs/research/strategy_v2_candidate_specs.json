@@ -1,0 +1,58 @@
+{
+  "research_id": "STRATEGY_RESEARCH_V2",
+  "frozen_before_oos": true,
+  "entry_timing": "confirmed candle close signal, next bar open reference",
+  "lookahead_bias": false,
+  "candidates": [
+    {
+      "candidate_id": "trend_continuation",
+      "economic_rationale": "Persistent medium-term direction can continue after fast trend overtakes slow trend.",
+      "entry_rule": "fast SMA > slow SMA, close > slow SMA, and trailing momentum positive",
+      "expected_behavior": "Participates in persistent directional advances and avoids flat or falling markets.",
+      "variants": [
+        {"variant_id": "trend_20_50", "parameters": {"fast": 20, "slow": 50, "momentum": 12}, "primary": true},
+        {"variant_id": "trend_24_60", "parameters": {"fast": 24, "slow": 60, "momentum": 12}, "primary": false}
+      ]
+    },
+    {
+      "candidate_id": "price_breakout",
+      "economic_rationale": "A close beyond established resistance can reveal new demand before continuation.",
+      "entry_rule": "close exceeds the high of the previous N confirmed candles",
+      "expected_behavior": "Sparse entries near genuine upside range expansion.",
+      "variants": [
+        {"variant_id": "breakout_20", "parameters": {"lookback": 20}, "primary": true},
+        {"variant_id": "breakout_40", "parameters": {"lookback": 40}, "primary": false}
+      ]
+    },
+    {
+      "candidate_id": "volatility_breakout",
+      "economic_rationale": "A resistance break accompanied by unusually large true range may indicate informed repricing.",
+      "entry_rule": "close exceeds previous rolling high and current true range exceeds a fixed ATR multiple",
+      "expected_behavior": "Fewer but stronger expansion entries than price breakout alone.",
+      "variants": [
+        {"variant_id": "vol_breakout_20", "parameters": {"lookback": 20, "atr_window": 14, "range_atr_multiple": 1.2}, "primary": true},
+        {"variant_id": "vol_breakout_40", "parameters": {"lookback": 40, "atr_window": 20, "range_atr_multiple": 1.2}, "primary": false}
+      ]
+    },
+    {
+      "candidate_id": "confirmed_mean_reversion",
+      "economic_rationale": "A material downside displacement may mean-revert only after price first demonstrates reversal.",
+      "entry_rule": "close is below a rolling mean by a fixed deviation and the confirmed candle reverses upward",
+      "expected_behavior": "Avoids buying deviation alone and waits for visible recovery confirmation.",
+      "variants": [
+        {"variant_id": "mean_reversion_50", "parameters": {"mean_window": 50, "deviation": 0.02}, "primary": true},
+        {"variant_id": "mean_reversion_60", "parameters": {"mean_window": 60, "deviation": 0.025}, "primary": false}
+      ]
+    },
+    {
+      "candidate_id": "momentum_pullback",
+      "economic_rationale": "A temporary pullback inside an established uptrend can offer continuation after momentum recovers.",
+      "entry_rule": "fast SMA above slow SMA, previous close below fast SMA, current close recovers above fast SMA and previous close",
+      "expected_behavior": "Enters trend resumptions rather than initial breakouts or falling pullbacks.",
+      "variants": [
+        {"variant_id": "pullback_20_50", "parameters": {"fast": 20, "slow": 50}, "primary": true},
+        {"variant_id": "pullback_24_60", "parameters": {"fast": 24, "slow": 60}, "primary": false}
+      ]
+    }
+  ]
+}

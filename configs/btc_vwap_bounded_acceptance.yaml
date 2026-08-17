@@ -1,0 +1,41 @@
+mode: demo
+exchange:
+  name: okx
+  simulated: true
+market:
+  instrument_id: BTC-USDT
+  instrument_type: spot
+  bar: 1h
+strategy:
+  name: vwap_mean_reversion
+  acceptance_only: true
+  timeframe: 1h
+  parameters:
+    vwap_window: 24
+    rsi_period: 14
+    entry_deviation_pct: 0.008
+    rsi_entry_threshold: 35
+    fixed_stop_pct: 0.02
+    atr_period: 14
+    atr_multiplier: 1.5
+    max_hold_bars: 12
+position_sizing:
+  name: fixed_notional
+  parameters:
+    order_notional: 5
+risk:
+  max_order_notional: 5
+  max_total_exposure: 10
+  max_daily_loss: 10
+  max_drawdown_pct: 5
+  max_orders_per_minute: 2
+  stale_after_seconds: 600
+protective_exits:
+  enabled: false
+backtest:
+  initial_capital: 10000
+data:
+  source: okx
+  limit: 120
+output:
+  directory: data/results/btc_vwap_bounded

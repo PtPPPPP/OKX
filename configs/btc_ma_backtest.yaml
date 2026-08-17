@@ -1,0 +1,49 @@
+mode: backtest
+
+exchange:
+  name: okx
+  simulated: true
+
+market:
+  instrument_id: BTC-USDT
+  instrument_type: spot
+  bar: 5m
+
+strategy:
+  name: moving_average_cross
+  parameters:
+    fast_period: 10
+    slow_period: 30
+    moving_average_type: sma
+
+position_sizing:
+  name: fixed_notional
+  parameters:
+    order_notional: 20
+
+risk:
+  max_order_notional: 20
+  max_total_exposure: 100
+  max_daily_loss: 10
+  max_drawdown_pct: 5
+  max_orders_per_minute: 2
+  stale_after_seconds: 600
+
+protective_exits:
+  enabled: true
+  stop_loss_pct: 1
+  take_profit_pct: 2
+
+backtest:
+  initial_capital: 10000
+  fee_rate: 0.001
+  slippage_rate: 0.0005
+  seed: 0
+
+data:
+  source: okx
+  limit: 300
+  output: data/btc_usdt_5m.csv
+
+output:
+  directory: data/results/btc_ma
