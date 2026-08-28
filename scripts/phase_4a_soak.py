@@ -763,16 +763,83 @@ async def _operate(
     return finalize_artifact(artifact_dir)
 
 
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_WINDOWS_STILL_ACTIVE_EXIT_CODE = 259
+_WINDOWS_ERROR_ACCESS_DENIED = 5
+_WINDOWS_ERROR_INVALID_PARAMETER = 87
+
+
 def _process_exists(process_id: int) -> bool:
+    """Probe whether one process is running, without ever signaling it.
+
+    PID values <= 0 address process groups or special system contexts, not a
+    single probeable process, and are refused: on POSIX ``kill(0, sig)``
+    targets the caller's whole process group, which is never what a liveness
+    probe means here.
+    """
+    if process_id <= 0:
+        return False
+    if os.name == "nt":
+        return _windows_process_exists(process_id)
     try:
+        # POSIX signal 0 is answered by the kernel without delivery.
         os.kill(process_id, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
-    except OSError as error:
-        return getattr(error, "winerror", None) != 87
+    except OSError:
+        return True
     return True
+
+
+def _windows_process_exists(process_id: int) -> bool:
+    """Windows liveness via query-only handles; never os.kill(pid, 0).
+
+    On Windows ``os.kill(pid, 0)`` aliases CTRL_C_EVENT, so a probe can raise
+    Ctrl+C inside the target console process. OpenProcess with
+    PROCESS_QUERY_LIMITED_INFORMATION only reads state. A terminated process
+    reports its real exit code instead of STILL_ACTIVE, so recently stopped
+    (even not-yet-reaped) processes read as dead, which signal-based probing
+    got wrong.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.GetExitCodeProcess.argtypes = (
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+
+    handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, process_id)
+    if not handle:
+        return not _windows_open_error_reports_missing(ctypes.get_last_error())
+    try:
+        exit_code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return True
+        # A process that exits with code 259 is indistinguishable from a live
+        # one; that is an inherent GetExitCodeProcess limitation.
+        return exit_code.value == _WINDOWS_STILL_ACTIVE_EXIT_CODE
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _windows_open_error_reports_missing(error_code: int) -> bool:
+    """Map a failed OpenProcess to a not-found verdict, failing closed.
+
+    ERROR_INVALID_PARAMETER is how Windows reports a PID with no process.
+    Anything else (notably ERROR_ACCESS_DENIED, a live process refusing query
+    access) must not be read as dead: claiming a running soak is gone is the
+    unsafe mistake, so unknown errors keep reporting the process as alive.
+    """
+    return error_code == _WINDOWS_ERROR_INVALID_PARAMETER
 
 
 def _parse_timestamps(values: Sequence[object]) -> list[datetime]:

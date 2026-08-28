@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -12,7 +16,11 @@ from app.services.continuous_shadow_repository import ContinuousShadowRepository
 from app.services.legacy_quarantine import RuntimeGenerationService
 from app.storage.database import Database
 from scripts.phase_4a_soak import (
+    _WINDOWS_ERROR_ACCESS_DENIED,
+    _WINDOWS_ERROR_INVALID_PARAMETER,
     WriteBoundaryCounters,
+    _process_exists,
+    _windows_open_error_reports_missing,
     analyze_timeline,
     append_jsonl,
     exchange_write_guard,
@@ -200,3 +208,64 @@ def test_finalize_reconciles_artifact_and_database_counters(tmp_path: Path) -> N
 def test_finalize_rejects_incomplete_run(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="incomplete"):
         finalize_artifact(tmp_path)
+
+
+def _spawn_sleeping_child(seconds: int) -> subprocess.Popen[None]:
+    return subprocess.Popen([sys.executable, "-c", f"import time; time.sleep({seconds})"])
+
+
+def test_process_exists_reports_current_process_alive() -> None:
+    assert _process_exists(os.getpid()) is True
+
+
+def test_process_probe_does_not_signal_running_child() -> None:
+    child = _spawn_sleeping_child(6)
+    try:
+        for _ in range(4):
+            assert _process_exists(child.pid) is True
+            # A probe that delivered Ctrl+C (the old os.kill(pid, 0) path on
+            # Windows) would interrupt the sleeper here.
+            assert child.poll() is None
+            time.sleep(0.2)
+        assert child.poll() is None
+    finally:
+        child.terminate()
+        child.wait(timeout=10)
+
+
+def test_process_exists_reports_reaped_child_dead() -> None:
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    assert child.wait(timeout=30) == 0
+    assert _process_exists(child.pid) is False
+
+
+def test_process_exists_reports_missing_pid_dead() -> None:
+    # 2**31 - 1 exceeds every supported PID space (Windows PIDs are < 2**31,
+    # Linux pid_max <= 2**22), so no process can own it.
+    assert _process_exists(2_147_483_647) is False
+
+
+@pytest.mark.parametrize("process_id", [0, -1])
+def test_process_exists_refuses_nonpositive_pid(process_id: int) -> None:
+    assert _process_exists(process_id) is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows unreaped-handle liveness semantics")
+def test_windows_process_exists_reports_unreaped_terminated_child_dead() -> None:
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    deadline = time.monotonic() + 30
+    while child.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert child.poll() is not None  # exited, deliberately left unwaited
+    try:
+        assert _process_exists(child.pid) is False
+    finally:
+        child.wait(timeout=10)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Win32 OpenProcess error classification")
+def test_windows_open_errors_fail_closed_for_unknown_and_denied() -> None:
+    assert _windows_open_error_reports_missing(_WINDOWS_ERROR_INVALID_PARAMETER) is True
+    # A live process refusing query access must not be reported dead.
+    assert _windows_open_error_reports_missing(_WINDOWS_ERROR_ACCESS_DENIED) is False
+    assert _windows_open_error_reports_missing(0) is False

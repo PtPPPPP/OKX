@@ -78,6 +78,25 @@ The tool owns only operational orchestration:
 
 It refuses to reuse an existing database.
 
+### Process liveness probing
+
+`status`, `stop` and `finalize` share one liveness probe that is strictly
+read-only: it never signals, interrupts or terminates the probed process.
+
+- Windows: `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` plus
+  `GetExitCodeProcess` (`STILL_ACTIVE` = 259 means running). `os.kill(pid, 0)`
+  is never used on Windows because signal 0 aliases `CTRL_C_EVENT` and can
+  raise Ctrl+C inside the target console process.
+- POSIX: `os.kill(pid, 0)`, which the kernel answers without delivery.
+- A failed `OpenProcess` with `ERROR_INVALID_PARAMETER` means the PID does not
+  exist; every other failure (including `ERROR_ACCESS_DENIED` from a live
+  process refusing query access) fails closed and keeps reporting the process
+  as alive, because wrongly declaring a running soak dead is the unsafe error.
+- PID values `<= 0` are refused without any OS call.
+
+Because the probe reads real OS state rather than artifact status, `status`
+still detects a dead process behind an artifact that claims to be running.
+
 ## Short shakedown
 
 Start a bounded detached shakedown:
