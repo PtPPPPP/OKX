@@ -74,6 +74,8 @@ The tool owns only operational orchestration:
 - lock renewal and heartbeat every 10 seconds;
 - append-and-fsync evidence records;
 - detached process lifecycle on Windows;
+- a one-shot `startup_evidence.json` written by the runner the moment REST
+  bootstrap and a real public WebSocket connection are both proven;
 - status, graceful stop and deterministic finalization.
 
 It refuses to reuse an existing database.
@@ -97,6 +99,29 @@ read-only: it never signals, interrupts or terminates the probed process.
 Because the probe reads real OS state rather than artifact status, `status`
 still detects a dead process behind an artifact that claims to be running.
 
+### Startup evidence
+
+`start` returns `process_status=running` only after the runner itself writes
+`startup_evidence.json` into the run's artifact directory — immediately when
+REST bootstrap and a real public WebSocket connection are both proven, never
+on a sampling timer.
+
+- The runner writes the file once, atomically and immutably; a second write is
+  a no-op. The payload binds run identity (`run_id`, `soak_id`, `process_id`,
+  `config_hash`) and carries no credentials.
+- The parent validates that identity against the run metadata and re-checks
+  the child is alive before reporting success. Malformed or foreign evidence
+  is never accepted: the `--startup-wait-seconds` deadline (default 60) fails
+  closed with a graceful `stop.requested`, and a child that exits before
+  proving itself fails immediately instead of waiting out the deadline.
+- Startup proof is independent of `--sample-interval-seconds`: the real 24h
+  soak keeps `300` second observation sampling while `start` returns within
+  seconds of the WebSocket connecting.
+- Channels stay separated: `startup_evidence.json` for the startup handshake,
+  `samples.jsonl` for periodic operational evidence, `final_report.json` for
+  final reconciliation. Artifacts written before this channel existed simply
+  lack the file and remain fully readable.
+
 ## Short shakedown
 
 Start a bounded detached shakedown:
@@ -110,7 +135,8 @@ uv run python scripts/phase_4a_soak.py start `
 ```
 
 The command returns JSON containing `run_id`, `process_id`, `start_utc`, `target_end_utc`, database
-and artifact paths only after REST bootstrap and a real public WebSocket connection succeed.
+and artifact paths only after REST bootstrap and a real public WebSocket connection succeed — proven
+by the run's one-shot `startup_evidence.json`, independent of the sampling interval.
 
 Read status using the returned artifact path:
 

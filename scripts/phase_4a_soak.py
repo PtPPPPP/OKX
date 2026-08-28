@@ -675,10 +675,30 @@ async def _operate(
                     sample_type="start",
                 ),
             )
+            startup_evidence_written = False
             next_renew = time.monotonic()
             next_sample = time.monotonic() + sample_interval_seconds
             while not task.done():
                 now_monotonic = time.monotonic()
+                if not startup_evidence_written and stream.connection_count >= 1:
+                    session = runner.session
+                    if (
+                        session is not None
+                        and network_evidence.rest_requests >= 1
+                        and network_evidence.rest_failures == 0
+                    ):
+                        startup_evidence_written = write_startup_evidence(
+                            artifact_dir / "startup_evidence.json",
+                            run_id=session.run_id,
+                            soak_id=artifact_dir.name,
+                            process_id=os.getpid(),
+                            instrument=INSTRUMENT_ID,
+                            bar_interval=BAR_INTERVAL,
+                            database_path=database_path,
+                            git_commit=str(metadata["git_commit"]),
+                            config_hash=str(metadata["config_hash"]),
+                            runtime_generation=generation_id,
+                        )
                 if stop_path.exists() or _utc_now() >= target_end:
                     await stream.stop()
                     break
@@ -1156,6 +1176,137 @@ def _automatic_paths() -> tuple[str, Path, Path]:
     )
 
 
+_STARTUP_EVIDENCE_SCHEMA_VERSION = 1
+
+
+def write_startup_evidence(
+    path: Path,
+    *,
+    run_id: str,
+    soak_id: str,
+    process_id: int,
+    instrument: str,
+    bar_interval: str,
+    database_path: Path,
+    git_commit: str,
+    config_hash: str,
+    runtime_generation: str,
+) -> bool:
+    """Record one-shot startup proof: REST bootstrap + real public WS connect.
+
+    The runner writes this the moment both real startup conditions hold, so
+    the parent's startup gate never depends on the periodic sampling cadence.
+    The file is immutable evidence: a second write is a no-op, and the payload
+    carries run identity only — never credentials.
+    """
+    if path.exists():
+        return False
+    write_json_atomic(
+        path,
+        {
+            "schema_version": _STARTUP_EVIDENCE_SCHEMA_VERSION,
+            "run_id": run_id,
+            "soak_id": soak_id,
+            "process_id": process_id,
+            "observed_at_utc": _iso(_utc_now()),
+            "rest_bootstrap": True,
+            "public_ws_connected": True,
+            "instrument": instrument,
+            "bar_interval": bar_interval,
+            "database_path": str(database_path),
+            "git_commit": git_commit,
+            "config_hash": config_hash,
+            "runtime_generation": runtime_generation,
+            "exchange_write_guard_installed": True,
+        },
+    )
+    return True
+
+
+def _validate_startup_evidence(
+    evidence: Mapping[str, object],
+    *,
+    metadata: Mapping[str, object],
+    soak_id: str,
+) -> None:
+    """Fail closed unless the evidence proves this run's real startup.
+
+    The evidence must carry this run's identity — run_id, soak_id, the
+    runner's self-recorded process_id from metadata.json and the config hash —
+    plus positive proof of REST bootstrap, a real public WebSocket connection
+    and the exchange write guard. The runner's own PID is the canonical run
+    identity (status/stop/finalize operate on it too); the direct child of
+    `start` can be a venv launcher that re-execs the interpreter. Anything
+    stale, malformed or foreign is rejected so it can never pass as success.
+    """
+    if evidence.get("schema_version") != _STARTUP_EVIDENCE_SCHEMA_VERSION:
+        raise ValueError("startup evidence schema_version mismatch")
+    for required_field in (
+        "rest_bootstrap",
+        "public_ws_connected",
+        "exchange_write_guard_installed",
+    ):
+        if evidence.get(required_field) is not True:
+            raise ValueError(f"startup evidence {required_field} is not proven")
+    if not evidence.get("run_id") or evidence.get("run_id") != metadata.get("run_id"):
+        raise ValueError("startup evidence run_id does not match run metadata")
+    if _as_int(evidence.get("process_id"), default=-1) != _as_int(
+        metadata.get("process_id"), default=-2
+    ):
+        raise ValueError("startup evidence process_id does not match run metadata")
+    if evidence.get("soak_id") != soak_id:
+        raise ValueError("startup evidence soak_id does not match the artifact")
+    metadata_config_hash = metadata.get("config_hash")
+    if metadata_config_hash is not None and evidence.get("config_hash") != metadata_config_hash:
+        raise ValueError("startup evidence config_hash does not match run metadata")
+
+
+def _await_startup_evidence(
+    *,
+    artifact_dir: Path,
+    process: subprocess.Popen[bytes],
+    soak_id: str,
+    timeout_seconds: int,
+    poll_interval_seconds: float = 0.5,
+) -> dict[str, object]:
+    """Wait for the child's one-shot startup evidence, independent of sampling.
+
+    Success requires evidence written by the runner itself, bound to this
+    run's identity, while the spawned process is still alive. A child that
+    exits first fails immediately; invalid evidence never counts as success
+    and the deadline still fails closed with a graceful stop request.
+    """
+    evidence_path = artifact_dir / "startup_evidence.json"
+    metadata_path = artifact_dir / "metadata.json"
+    failure_path = artifact_dir / "startup_failure.json"
+    deadline = time.monotonic() + timeout_seconds
+    last_rejection = "startup evidence not observed"
+    while time.monotonic() < deadline:
+        if evidence_path.exists():
+            try:
+                evidence = _load_json(evidence_path)
+                _validate_startup_evidence(
+                    evidence,
+                    metadata=_load_json(metadata_path) if metadata_path.exists() else {},
+                    soak_id=soak_id,
+                )
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                last_rejection = f"invalid startup evidence: {error}"
+            else:
+                if process.poll() is not None:
+                    raise RuntimeError("Phase 4A process exited right after startup evidence")
+                return evidence
+        if process.poll() is not None:
+            failure = _load_json(failure_path) if failure_path.exists() else {}
+            raise RuntimeError(f"Phase 4A process exited during startup: {failure}")
+        time.sleep(poll_interval_seconds)
+    (artifact_dir / "stop.requested").touch(exist_ok=True)
+    raise TimeoutError(
+        f"Phase 4A startup was not proven within {timeout_seconds}s "
+        f"(last rejection: {last_rejection}): {artifact_dir}"
+    )
+
+
 def start_detached(args: argparse.Namespace) -> int:
     soak_id, artifact_dir, database_path = _automatic_paths()
     artifact_dir.mkdir(parents=True, exist_ok=False)
@@ -1198,30 +1349,16 @@ def start_detached(args: argparse.Namespace) -> int:
             creationflags=creation_flags,
             start_new_session=os.name != "nt",
         )
-    deadline = time.monotonic() + args.startup_wait_seconds
-    metadata_path = artifact_dir / "metadata.json"
-    failure_path = artifact_dir / "startup_failure.json"
-    while time.monotonic() < deadline:
-        if metadata_path.exists():
-            metadata = _load_json(metadata_path)
-            samples = read_jsonl(artifact_dir / "samples.jsonl")
-            connected = any(
-                _as_int(sample.get("public_ws_connects")) >= 1
-                for sample in samples
-                if sample.get("type") in {"start", "periodic"}
-            )
-            if metadata.get("run_id") and connected and process.poll() is None:
-                metadata.update({"soak_id": soak_id, "process_status": "running"})
-                print(json.dumps(metadata, ensure_ascii=False))
-                return 0
-        if process.poll() is not None:
-            failure = _load_json(failure_path) if failure_path.exists() else {}
-            raise RuntimeError(f"Phase 4A process exited during startup: {failure}")
-        time.sleep(0.5)
-    (artifact_dir / "stop.requested").touch(exist_ok=True)
-    raise TimeoutError(
-        f"Phase 4A startup did not prove a public WebSocket connection: {artifact_dir}"
+    evidence = _await_startup_evidence(
+        artifact_dir=artifact_dir,
+        process=process,
+        soak_id=soak_id,
+        timeout_seconds=args.startup_wait_seconds,
     )
+    metadata = _load_json(artifact_dir / "metadata.json")
+    metadata.update({"soak_id": soak_id, "process_status": "running", "startup_evidence": evidence})
+    print(json.dumps(metadata, ensure_ascii=False))
+    return 0
 
 
 def status_command(args: argparse.Namespace) -> int:

@@ -19,6 +19,8 @@ from scripts.phase_4a_soak import (
     _WINDOWS_ERROR_ACCESS_DENIED,
     _WINDOWS_ERROR_INVALID_PARAMETER,
     WriteBoundaryCounters,
+    _await_startup_evidence,
+    _load_json,
     _process_exists,
     _windows_open_error_reports_missing,
     analyze_timeline,
@@ -28,6 +30,7 @@ from scripts.phase_4a_soak import (
     read_jsonl,
     unexplained_gap_count,
     write_json_atomic,
+    write_startup_evidence,
 )
 
 
@@ -269,3 +272,228 @@ def test_windows_open_errors_fail_closed_for_unknown_and_denied() -> None:
     # A live process refusing query access must not be reported dead.
     assert _windows_open_error_reports_missing(_WINDOWS_ERROR_ACCESS_DENIED) is False
     assert _windows_open_error_reports_missing(0) is False
+
+
+_EVIDENCE_CHILD_SNIPPET = "\n".join(
+    [
+        "import json, os, sys, time",
+        "artifact, run_id, soak_id, config_hash = sys.argv[1:5]",
+        "pid = os.getpid()",
+        "tmp = os.path.join(artifact, 'metadata.json.tmp')",
+        "with open(tmp, 'w', encoding='utf-8') as handle:",
+        "    json.dump({'run_id': run_id, 'config_hash': config_hash, 'process_id': pid}, handle)",
+        "os.replace(tmp, os.path.join(artifact, 'metadata.json'))",
+        "time.sleep(0.3)",
+        "payload = {",
+        "    'schema_version': 1,",
+        "    'run_id': run_id,",
+        "    'soak_id': soak_id,",
+        "    'process_id': pid,",
+        "    'rest_bootstrap': True,",
+        "    'public_ws_connected': True,",
+        "    'exchange_write_guard_installed': True,",
+        "    'config_hash': config_hash,",
+        "}",
+        "tmp = os.path.join(artifact, 'startup_evidence.json.tmp')",
+        "with open(tmp, 'w', encoding='utf-8') as handle:",
+        "    json.dump(payload, handle)",
+        "os.replace(tmp, os.path.join(artifact, 'startup_evidence.json'))",
+        "time.sleep(30)",
+    ]
+)
+
+
+def _spawn_evidence_child(artifact: Path, run_id: str, config_hash: str) -> subprocess.Popen[bytes]:
+    return subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            _EVIDENCE_CHILD_SNIPPET,
+            str(artifact),
+            run_id,
+            artifact.name,
+            config_hash,
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _spawn_silent_sleeper() -> subprocess.Popen[bytes]:
+    return subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _prepare_run_metadata(artifact: Path, run_id: str, config_hash: str = "cfg-hash") -> None:
+    artifact.mkdir(parents=True, exist_ok=True)
+    write_json_atomic(artifact / "metadata.json", {"run_id": run_id, "config_hash": config_hash})
+
+
+def test_startup_evidence_proves_run_independent_of_sampling(tmp_path: Path) -> None:
+    artifact = tmp_path / "artifact"
+    _prepare_run_metadata(artifact, "run-abc", "cfg-123")
+    child = _spawn_evidence_child(artifact, "run-abc", "cfg-123")
+    try:
+        started = time.monotonic()
+        evidence = _await_startup_evidence(
+            artifact_dir=artifact,
+            process=child,
+            soak_id=artifact.name,
+            timeout_seconds=10,
+            poll_interval_seconds=0.05,
+        )
+        elapsed = time.monotonic() - started
+        assert evidence["rest_bootstrap"] is True
+        assert evidence["public_ws_connected"] is True
+        assert evidence["run_id"] == "run-abc"
+        # Proof arrived without any periodic sample, far below any cadence.
+        assert elapsed < 5
+        assert not (artifact / "samples.jsonl").exists()
+        assert child.poll() is None
+    finally:
+        child.kill()
+        child.wait(timeout=10)
+
+
+@pytest.mark.parametrize("sample_interval_seconds", [5, 60, 300, 3600])
+def test_startup_proof_identical_for_every_sample_interval(
+    tmp_path: Path, sample_interval_seconds: int
+) -> None:
+    # The sampler cadence must never gate the startup handshake: even with a
+    # start sample stuck at zero connections and no periodic sample inside the
+    # whole startup window, the evidence channel proves the run.
+    artifact = tmp_path / f"artifact-{sample_interval_seconds}"
+    _prepare_run_metadata(artifact, "run-xyz")
+    append_jsonl(artifact / "samples.jsonl", {"type": "start", "public_ws_connects": 0})
+    child = _spawn_evidence_child(artifact, "run-xyz", "cfg-hash")
+    try:
+        evidence = _await_startup_evidence(
+            artifact_dir=artifact,
+            process=child,
+            soak_id=artifact.name,
+            timeout_seconds=10,
+            poll_interval_seconds=0.05,
+        )
+        assert evidence["public_ws_connected"] is True
+        assert evidence["run_id"] == "run-xyz"
+    finally:
+        child.kill()
+        child.wait(timeout=10)
+
+
+def test_startup_wait_times_out_and_requests_graceful_stop(tmp_path: Path) -> None:
+    artifact = tmp_path / "artifact"
+    _prepare_run_metadata(artifact, "run-slow")
+    child = _spawn_silent_sleeper()
+    try:
+        with pytest.raises(TimeoutError, match="startup was not proven"):
+            _await_startup_evidence(
+                artifact_dir=artifact,
+                process=child,
+                soak_id=artifact.name,
+                timeout_seconds=2,
+                poll_interval_seconds=0.05,
+            )
+        assert (artifact / "stop.requested").exists()
+        # The wait never signaled the child: it survived the whole window.
+        assert child.poll() is None
+    finally:
+        child.terminate()
+        child.wait(timeout=10)
+
+
+def test_startup_wait_fails_fast_when_child_exits_without_evidence(tmp_path: Path) -> None:
+    artifact = tmp_path / "artifact"
+    _prepare_run_metadata(artifact, "run-dead")
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait(timeout=10)
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="exited during startup"):
+        _await_startup_evidence(
+            artifact_dir=artifact,
+            process=child,
+            soak_id=artifact.name,
+            timeout_seconds=30,
+            poll_interval_seconds=0.05,
+        )
+    assert time.monotonic() - started < 10
+    assert not (artifact / "startup_evidence.json").exists()
+
+
+def test_startup_wait_rejects_foreign_run_evidence(tmp_path: Path) -> None:
+    artifact = tmp_path / "artifact"
+    _prepare_run_metadata(artifact, "run-real")
+    child = _spawn_silent_sleeper()
+    try:
+        assert (
+            write_startup_evidence(
+                artifact / "startup_evidence.json",
+                run_id="run-other",
+                soak_id=artifact.name,
+                process_id=child.pid,
+                instrument="BTC-USDT",
+                bar_interval="1h",
+                database_path=artifact / "soak.db",
+                git_commit="commit",
+                config_hash="cfg-hash",
+                runtime_generation="gen",
+            )
+            is True
+        )
+        with pytest.raises(TimeoutError, match="run_id"):
+            _await_startup_evidence(
+                artifact_dir=artifact,
+                process=child,
+                soak_id=artifact.name,
+                timeout_seconds=2,
+                poll_interval_seconds=0.05,
+            )
+        assert (artifact / "stop.requested").exists()
+    finally:
+        child.terminate()
+        child.wait(timeout=10)
+
+
+def test_startup_wait_rejects_malformed_evidence(tmp_path: Path) -> None:
+    artifact = tmp_path / "artifact"
+    _prepare_run_metadata(artifact, "run-broken")
+    child = _spawn_silent_sleeper()
+    try:
+        (artifact / "startup_evidence.json").write_bytes(b"{not valid json")
+        with pytest.raises(TimeoutError, match="invalid startup evidence"):
+            _await_startup_evidence(
+                artifact_dir=artifact,
+                process=child,
+                soak_id=artifact.name,
+                timeout_seconds=2,
+                poll_interval_seconds=0.05,
+            )
+    finally:
+        child.terminate()
+        child.wait(timeout=10)
+
+
+def test_startup_evidence_is_one_shot_and_credential_free(tmp_path: Path) -> None:
+    path = tmp_path / "startup_evidence.json"
+    base = {
+        "run_id": "run-1",
+        "soak_id": "soak",
+        "process_id": 4242,
+        "instrument": "BTC-USDT",
+        "bar_interval": "1h",
+        "database_path": tmp_path / "soak.db",
+        "git_commit": "commit",
+        "config_hash": "hash",
+        "runtime_generation": "gen",
+    }
+    assert write_startup_evidence(path, **base) is True
+    evidence = _load_json(path)
+    assert evidence["rest_bootstrap"] is True
+    assert evidence["public_ws_connected"] is True
+    assert evidence["exchange_write_guard_installed"] is True
+    assert not {"api_key", "secret", "passphrase", "account_id"} & set(evidence)
+    assert write_startup_evidence(path, **{**base, "run_id": "run-2"}) is False
+    assert _load_json(path) == evidence
