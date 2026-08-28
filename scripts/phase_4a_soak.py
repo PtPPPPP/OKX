@@ -779,7 +779,7 @@ def _process_exists(process_id: int) -> bool:
     """
     if process_id <= 0:
         return False
-    if os.name == "nt":
+    if sys.platform == "win32":
         return _windows_process_exists(process_id)
     try:
         # POSIX signal 0 is answered by the kernel without delivery.
@@ -803,7 +803,11 @@ def _windows_process_exists(process_id: int) -> bool:
     (even not-yet-reaped) processes read as dead, which signal-based probing
     got wrong.
     """
-    import ctypes
+    if sys.platform != "win32":
+        # The ctypes.WinDLL symbols below are declared Windows-only in
+        # typeshed, so this early exit also keeps Linux-platform mypy analysis
+        # out of the Win32 body instead of failing on them.
+        raise RuntimeError("Windows process probe used on non-Windows platform")
     from ctypes import wintypes
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
