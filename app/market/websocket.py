@@ -9,7 +9,8 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Literal, Protocol, cast
 
-from websockets.asyncio.client import connect
+from websockets.asyncio.client import ClientConnection, connect
+from websockets.exceptions import ConnectionClosed
 
 from app.domain.market import Candle
 from app.exchange.okx_models import parse_candle
@@ -54,12 +55,40 @@ class WebSocketLike(Protocol):
 
 
 ConnectionFactory = Callable[[str], AbstractAsyncContextManager[WebSocketLike]]
+_RECONNECTABLE_WEBSOCKET_ERRORS = (ConnectionClosed, TimeoutError, OSError)
+
+
+class HTTPProxyClientConnection(ClientConnection):
+    """Ignore a transport loss that precedes asyncio ``connection_made``.
+
+    websockets' HTTP-proxy WSS path switches the tunnel transport to the
+    WebSocket protocol before ``start_tls`` completes. If TLS is reset in that
+    window, asyncio may call ``connection_lost`` before websockets receives
+    ``connection_made``. No WebSocket connection exists yet; the surrounding
+    ``start_tls`` operation owns reporting that connection failure.
+
+    This adapter uses only asyncio.Protocol callbacks and websockets' public
+    ``create_connection`` extension point. Established connections delegate
+    every close path to websockets unchanged.
+    """
+
+    connection_established = False
+
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:
+        super().connection_made(transport)
+        self.connection_established = True
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        if not self.connection_established:
+            return
+        super().connection_lost(exc)
 
 
 @asynccontextmanager
 async def default_websocket_connection(
     url: str, *, proxy: str | Literal[True] | None = True
 ) -> AsyncIterator[WebSocketLike]:
+    connection_factory = HTTPProxyClientConnection if proxy is not None else None
     async with connect(
         url,
         proxy=proxy,
@@ -67,6 +96,7 @@ async def default_websocket_connection(
         open_timeout=10,
         close_timeout=5,
         max_size=2**20,
+        create_connection=connection_factory,
     ) as socket:
         yield cast(WebSocketLike, socket)
 
@@ -118,6 +148,15 @@ class OKXPublicWebSocketProvider:
         self._stopping = asyncio.Event()
         self._active: WebSocketLike | None = None
         self._active_subscription: tuple[str, str] | None = None
+
+    async def _wait_before_reconnect(self, attempt: int) -> bool:
+        """Return true when a graceful stop interrupts the existing backoff."""
+        delay = min(self.base_reconnect_delay_seconds * 2 ** (attempt - 1), 30)
+        try:
+            await asyncio.wait_for(self._stopping.wait(), timeout=delay)
+        except TimeoutError:
+            return False
+        return True
 
     async def stream_confirmed_candles(self, instrument_id: str, bar: str) -> AsyncIterator[Candle]:
         """Compatibility candle stream for existing non-Shadow consumers."""
@@ -171,7 +210,7 @@ class OKXPublicWebSocketProvider:
             except asyncio.CancelledError:
                 self.state = ConnectionState.STOPPED
                 raise
-            except Exception as exc:
+            except _RECONNECTABLE_WEBSOCKET_ERRORS as exc:
                 self._active = None
                 self.last_error = f"{type(exc).__name__}: {exc}"
                 if self._stopping.is_set():
@@ -183,7 +222,11 @@ class OKXPublicWebSocketProvider:
                     raise MarketDataError(
                         f"WebSocket 连续重连失败: {type(exc).__name__}: {exc}"
                     ) from exc
-                await asyncio.sleep(min(self.base_reconnect_delay_seconds * 2 ** (attempt - 1), 30))
+                if await self._wait_before_reconnect(attempt):
+                    break
+            except Exception:
+                self.state = ConnectionState.BLOCKED
+                raise
             finally:
                 self._active = None
                 self._active_subscription = None
@@ -241,7 +284,7 @@ class OKXPublicWebSocketProvider:
             except asyncio.CancelledError:
                 self.state = ConnectionState.STOPPED
                 raise
-            except Exception as exc:
+            except _RECONNECTABLE_WEBSOCKET_ERRORS as exc:
                 self._active = None
                 self.last_error = f"{type(exc).__name__}: {exc}"
                 if self._stopping.is_set():
@@ -249,6 +292,8 @@ class OKXPublicWebSocketProvider:
                 if subscribed:
                     self.state = ConnectionState.DISCONNECTED
                     yield PublicWebSocketEvent(PublicWebSocketEventType.DISCONNECTED, generation)
+                    if self._stopping.is_set():
+                        break
                 attempt += 1
                 self.reconnect_count += 1
                 if attempt > self.max_reconnect_attempts:
@@ -256,7 +301,11 @@ class OKXPublicWebSocketProvider:
                     raise MarketDataError(
                         f"WebSocket reconnect limit exceeded: {type(exc).__name__}: {exc}"
                     ) from exc
-                await asyncio.sleep(min(self.base_reconnect_delay_seconds * 2 ** (attempt - 1), 30))
+                if await self._wait_before_reconnect(attempt):
+                    break
+            except Exception:
+                self.state = ConnectionState.BLOCKED
+                raise
             finally:
                 self._active = None
                 self._active_subscription = None

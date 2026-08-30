@@ -23,6 +23,7 @@ from app.services.vwap_continuous_shadow import (
     ContinuousVWAPShadowRunner,
 )
 from app.storage.database import Database
+from scripts.phase_4a_soak import WriteBoundaryCounters, exchange_write_guard
 
 
 def _candle(timestamp: datetime, price: str = "100") -> Candle:
@@ -334,10 +335,22 @@ def test_local_event_integration_reconciles_before_accepting_new_generation(
         yield PublicWebSocketEvent(PublicWebSocketEventType.RECONNECTED, 2)
         yield PublicWebSocketEvent(PublicWebSocketEventType.CANDLE, 2, candles[31])
 
-    result = asyncio.run(runner.run_events(events()))
+    write_counters = WriteBoundaryCounters()
+    with exchange_write_guard(write_counters):
+        result = asyncio.run(runner.run_events(events()))
     assert result.confirmed_bars_processed == 3
     assert runner.session is not None
     assert runner.session.lifecycle_state is ContinuousShadowLifecycle.STOPPED
     assert runner.session.rejected_live_candles == 1
     for candle in candles[29:32]:
         assert _business_counts(database, result.run_id, candle)[0:2] == (1, 1)
+    with sqlite3.connect(database.path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM orders").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 0
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM shadow_order_proposals WHERE submission_performed=1"
+            ).fetchone()[0]
+            == 0
+        )
+    assert write_counters.total == 0

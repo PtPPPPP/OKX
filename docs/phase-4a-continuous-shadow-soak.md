@@ -61,6 +61,23 @@ $env:OKX_PROXY_URL = "http://127.0.0.1:<PORT>"
 Do not disable TLS verification. The proxy URL itself is never written to soak artifacts; artifacts
 record only the network mode and whether an explicit proxy was configured.
 
+### HTTP proxy reconnect compatibility
+
+The 2026-08-28 soak preserved 20 confirmed candles across natural reconnects, then exposed a
+`websockets` HTTP-proxy TLS initialization race. During `start_tls`, the library can attach a
+`ClientConnection` to the proxy tunnel before asyncio calls `connection_made`. A transport reset in
+that narrow window invokes the library's `connection_lost` callback before its receive assembler is
+initialized.
+
+`app.market.websocket.HTTPProxyClientConnection` is installed through websockets' documented
+`create_connection` factory only when a proxy is in use. It ignores only this pre-establishment loss
+callback; `start_tls` still reports the failed connection to the existing bounded reconnect loop.
+Once `connection_made` succeeds, all receive, close and error handling delegates to websockets
+unchanged. Unknown application errors fail closed immediately and aren't treated as network closes.
+
+This compatibility boundary doesn't change retry counts, backoff timing, REST fallback, TLS
+verification, strategy behavior, database durability, or exchange-write safety.
+
 ## Tooling
 
 ```powershell
