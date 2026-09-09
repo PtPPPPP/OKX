@@ -115,7 +115,12 @@ class OKXPublicWebSocketProvider:
         heartbeat_seconds: float = 20,
         pong_timeout_seconds: float = 10,
         stale_after_seconds: int = 120,
-        max_reconnect_attempts: int = 5,
+        # The budget counts consecutive failed reconnects only; a successful
+        # connection resets it. Twenty attempts with exponential backoff capped
+        # at 60 seconds tolerate an outage of roughly 18 minutes — long enough
+        # for local-proxy route changes during a 24h soak, while remaining a
+        # bounded fail-closed limit rather than an infinite retry loop.
+        max_reconnect_attempts: int = 20,
         base_reconnect_delay_seconds: float = 1,
         shutdown_timeout_seconds: float = 5,
     ) -> None:
@@ -151,7 +156,7 @@ class OKXPublicWebSocketProvider:
 
     async def _wait_before_reconnect(self, attempt: int) -> bool:
         """Return true when a graceful stop interrupts the existing backoff."""
-        delay = min(self.base_reconnect_delay_seconds * 2 ** (attempt - 1), 30)
+        delay = min(self.base_reconnect_delay_seconds * 2 ** (attempt - 1), 60)
         try:
             await asyncio.wait_for(self._stopping.wait(), timeout=delay)
         except TimeoutError:

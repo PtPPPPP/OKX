@@ -13,6 +13,7 @@ from websockets.exceptions import ConnectionClosedOK
 from websockets.frames import Close
 from websockets.uri import parse_uri
 
+from app.market.historical_data import MarketDataError
 from app.market.websocket import (
     ConnectionState,
     HTTPProxyClientConnection,
@@ -410,6 +411,94 @@ def test_public_websocket_survives_ten_reconnect_cycles_without_task_leak() -> N
     assert provider.connection_count == 11
     assert provider.reconnect_count == 10
     assert all(socket.closed for socket in all_sockets)
+
+
+def test_public_websocket_survives_prolonged_reconnect_outage_with_default_budget() -> None:
+    """A multi-minute transport outage must not exhaust the default reconnect budget.
+
+    Regression for the 2026-08-30 Phase 4A soak: one WS_CLOSE followed by eight
+    consecutive failed reconnects (a ~2-minute outage through the local proxy)
+    terminated the run because the budget only tolerated five failures. The
+    default budget must survive an outage of that length and still deliver the
+    next confirmed candle after recovery.
+    """
+    current = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) - timedelta(hours=2)
+    first = ClosingSocket(
+        [json.dumps({"event": "subscribe"}), _data(_row(current))],
+        ConnectionResetError("fixture outage begins"),
+    )
+    recovered = FakeSocket(
+        [json.dumps({"event": "subscribe"}), _data(_row(current + timedelta(hours=1)))]
+    )
+    attempts = 0
+
+    @asynccontextmanager
+    async def factory(_url: str) -> AsyncIterator[WebSocketLike]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            try:
+                yield first
+            finally:
+                await first.close()
+        elif attempts <= 9:
+            raise ConnectionResetError(f"fixture outage attempt {attempts}")
+        else:
+            try:
+                yield recovered
+            finally:
+                await recovered.close()
+
+    provider = OKXPublicWebSocketProvider(
+        connection_factory=factory, stale_after_seconds=10800, base_reconnect_delay_seconds=0
+    )
+
+    async def exercise() -> list[PublicWebSocketEventType]:
+        events: list[PublicWebSocketEventType] = []
+        async for event in provider.stream_events("BTC-USDT", "1h"):
+            events.append(event.event_type)
+            if event.event_type is PublicWebSocketEventType.CANDLE and event.generation == 2:
+                await provider.stop()
+        return events
+
+    assert asyncio.run(exercise()) == [
+        PublicWebSocketEventType.CONNECTED,
+        PublicWebSocketEventType.CANDLE,
+        PublicWebSocketEventType.DISCONNECTED,
+        PublicWebSocketEventType.RECONNECTED,
+        PublicWebSocketEventType.CANDLE,
+        PublicWebSocketEventType.CLOSED,
+    ]
+    assert attempts == 10
+    assert provider.reconnect_count == 9
+    assert provider.connection_count == 2
+    assert first.closed and recovered.closed
+
+
+def test_public_websocket_reconnect_budget_remains_bounded() -> None:
+    """The enlarged budget stays bounded and still fails closed at its limit."""
+    attempts = 0
+
+    @asynccontextmanager
+    async def factory(_url: str) -> AsyncIterator[WebSocketLike]:
+        nonlocal attempts
+        attempts += 1
+        raise ConnectionResetError(f"fixture outage attempt {attempts}")
+        yield FakeSocket([])  # pragma: no cover
+
+    provider = OKXPublicWebSocketProvider(
+        connection_factory=factory, base_reconnect_delay_seconds=0
+    )
+
+    async def exercise() -> None:
+        async for _event in provider.stream_events("BTC-USDT", "1h"):
+            raise AssertionError("unexpected event")
+
+    with pytest.raises(MarketDataError, match="WebSocket reconnect limit exceeded"):
+        asyncio.run(exercise())
+    assert attempts == provider.max_reconnect_attempts + 1
+    assert provider.reconnect_count == provider.max_reconnect_attempts + 1
+    assert provider.state is ConnectionState.BLOCKED
 
 
 def test_public_websocket_shutdown_closes_a_pending_receive() -> None:

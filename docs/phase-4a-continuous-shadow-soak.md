@@ -78,6 +78,29 @@ unchanged. Unknown application errors fail closed immediately and aren't treated
 This compatibility boundary doesn't change retry counts, backoff timing, REST fallback, TLS
 verification, strategy behavior, database durability, or exchange-write safety.
 
+### Reconnect budget (R2, 2026-09)
+
+The 2026-08-30 24h soak (`20260830T170211Z-6b1ece98`) died after 84 minutes: one
+`WS_CLOSE` followed by six consecutive failed reconnects. The previous default budget
+(five consecutive failures ≈ 90 seconds of tolerated outage, backoff capped at 30 s)
+was smaller than an ordinary local-proxy route interruption, so a known transport
+failure escalated to an uncaught `MarketDataError("WebSocket reconnect limit exceeded")`
+and a non-graceful run termination.
+
+The default budget now tolerates roughly 18 minutes of consecutive transport failure:
+
+```text
+max_reconnect_attempts = 20   # consecutive failures only; success resets the counter
+reconnect backoff         = 1s exponential, capped at 60s
+open timeout per attempt  = 10s
+fail-closed behavior      = unchanged (bounded, never an infinite retry loop)
+```
+
+The exception whitelist is unchanged: `ConnectionClosed`/`TimeoutError`/`OSError`
+still map to controlled reconnect; every other error still fails closed immediately.
+Candle continuity is still restored after a successful reconnect through the mandatory
+persisted-checkpoint REST reconciliation, not by a second deduplication mechanism.
+
 ## Tooling
 
 ```powershell
