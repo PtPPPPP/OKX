@@ -9,6 +9,8 @@ __pycache__/
 pt_basetemp/
 pt_audit_tmp*/
 pt_verify*/
+pt_3b_clone_test/
+pt_fa_clone/
 audit_pt_root*/
 .mypy_cache/
 .mypy-*/
