@@ -104,7 +104,9 @@ $snapshot = 'D:/research-archive/experiment-001/snapshot.py'
 
 计算子进程使用 `.runtime` 的 Python，启用 `-I -S -B`，只显式加入快照 `code` 和其依赖目录。
 `PYTHONPATH`、当前目录、用户 site、`.pth`、`sitecustomize` 不参与导入；另检查已加载研究模块
-确实来自 `code`。只传递必要的操作系统环境变量，不转发 OKX 凭证、配置覆盖或 uv/pip 环境覆盖。
+确实来自 `code`。只传递必要的操作系统环境变量及 `UV_CACHE_DIR` 缓存位置，不转发 OKX 凭证、
+索引、解释器、安装策略等 uv/pip 环境覆盖。缓存位置沿用依赖准备阶段的设置；缓存不足时
+离线恢复仍明确失败，不改用其他缓存、联网或切换版本。
 计算入口不调用网络下载器或交易 API。这是研究入口隔离，不是对恶意 Python 代码的操作系统沙箱。
 
 ## 数据方案

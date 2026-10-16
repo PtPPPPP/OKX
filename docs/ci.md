@@ -19,6 +19,11 @@ cache=仅 uv 依赖缓存（setup-uv enable-cache）；绝不缓存 data/、arti
 `uv sync --extra dev`（依赖安装失败）与 `scripts/quality_gate.py`（质量失败）是独立
 step，CI 日志可直接区分两类失败。
 
+研究快照的集成测试通过 `--locked --offline` 在临时 `.runtime` 中恢复依赖。
+`setup-uv` 会设置独立的 `UV_CACHE_DIR`；快照启动器清理环境时仅保留这一缓存位置，
+使它使用上述安装步骤填充的同一缓存。索引、解释器、安装策略及凭证等覆盖变量仍被过滤。
+未填充或缺包的缓存仍必须报错，不通过联网重试、跳过测试或修改锁文件来规避。
+
 ## 第三方 actions（官方/广泛使用，版本已记录）
 
 ```text

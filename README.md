@@ -20,18 +20,18 @@ production-ready 或 live-trading-ready。
 | Engineering Baseline | Phase 3A 已完成 |
 | CI Integration | Phase 3B 已完成 |
 | First Commit Safety Audit | Phase 3C 已完成，`BLOCKER=0`、`P1=0` |
-| 本地完整质量门 | 本次 Windows 验证 782/782 tests、80/80 security smoke，通过 |
+| 本开发副本完整质量门 | 2026-10-16 Windows：872/872 tests、Ruff、Mypy 通过；见 [P1 验收](docs/strategy-contract-validation.md) |
 | 干净 clone 基线 | 历史 Phase 3C 记录 698/698 tests、80/80 security smoke；本次未重验 |
 | GitHub Actions | 配置 Windows 与 Ubuntu 矩阵；远端运行结果不在本文中静态宣称 |
 | 实盘交易 | 不支持，代码和配置均 fail closed |
 
-Phase 3C 的 698/703 项测试计数是历史验收记录。本次目录已包含后续测试及回测正确性修复，
-当前本地质量门为 782 项。未重新验证干净 clone 或远端 CI，不能把历史计数当作当前版本验收。
+Phase 3C 的 698/703 项测试计数是历史验收记录。本隔离开发副本包含后续回测、快照和 V3
+策略契约改进，当前完整回归为 872 项。原冻结目录保持不变；未重新验证干净 clone 或远端 CI。
 
 ## 核心能力
 
 - 配置驱动：YAML 与环境变量合并，环境变量优先。
-- 策略注册：`buy_and_hold`、`moving_average_cross`、`vwap_mean_reversion`。
+- 策略注册：`buy_and_hold`、`moving_average_cross`、`vwap_mean_reversion`，以及五类仅研究的 V3 候选。
 - 回测：CSV 或 OKX 公共 REST 历史 K 线、动态交易规则、手续费、滑点、风控和报告输出。
 - 市场观察：公共 WebSocket 只读观察，不创建订单。
 - VWAP Shadow：公共行情连续观察和本地 SQLite 状态恢复，不访问私有 API、不提交订单。

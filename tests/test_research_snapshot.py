@@ -17,6 +17,7 @@ from backtest.research_governance import PROJECT_ROOT, SOURCE_FILES, file_hash, 
 from backtest.vwap_signal_edge_data import HistoricalCandleCache, RawCandle, _manifest
 from scripts.research_snapshot import (
     DATA_FILES,
+    _clean_environment,
     create_snapshot,
     digest,
     execute_snapshot,
@@ -103,6 +104,53 @@ def prepare(bundle: Path, uv: str) -> None:
     prepare_runtime(
         bundle, uv=uv, offline=True, python=str(getattr(sys, "_base_executable", sys.executable))
     )
+
+
+def test_environment_keeps_only_cache_location_among_dependency_overrides(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cache = str(tmp_path / "configured uv cache")
+    monkeypatch.setenv("UV_CACHE_DIR", cache)
+    forbidden = (
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "UV_INDEX_URL",
+        "UV_EXTRA_INDEX_URL",
+        "UV_PYTHON",
+        "UV_OFFLINE",
+        "UV_NO_VERIFY_HASHES",
+        "UV_PROJECT_ENVIRONMENT",
+        "PIP_INDEX_URL",
+        "OKX_API_KEY",
+    )
+    for key in forbidden:
+        monkeypatch.setenv(key, "test-only-untrusted-override")
+    clean = _clean_environment(tmp_path)
+    assert clean["UV_CACHE_DIR"] == cache
+    assert clean["UV_PROJECT_ENVIRONMENT"] == str(tmp_path / ".runtime")
+    assert not (set(forbidden) - {"UV_PROJECT_ENVIRONMENT"}) & clean.keys()
+
+
+def test_offline_restore_uses_configured_cache_with_an_empty_default_home(
+    bundle: Path, uv: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cache = subprocess.check_output([uv, "cache", "dir"], text=True, encoding="utf-8").strip()
+    empty_home = tmp_path / "empty default home"
+    empty_home.mkdir()
+    for key in ("HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA"):
+        monkeypatch.setenv(key, str(empty_home))
+    monkeypatch.setenv("UV_CACHE_DIR", cache)
+    prepare(bundle, uv)
+    assert (bundle / ".runtime/environment.json").is_file()
+
+
+def test_empty_configured_cache_cannot_silently_use_a_populated_default_cache(
+    bundle: Path, uv: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "empty cache"))
+    with pytest.raises(ValueError, match="locked environment command failed"):
+        prepare(bundle, uv)
+    assert not (bundle / ".runtime/environment.json").exists()
 
 
 def launch(

@@ -370,7 +370,9 @@ def _uv_command(
 
 
 def _clean_environment(root: Path) -> dict[str, str]:
-    # Only OS/runtime necessities; do not forward credentials, PYTHONPATH, uv/pip overrides or settings.
+    # Keep the cache location used during dependency provisioning (e.g. setup-uv in CI).
+    # It cannot override the locked versions, package index or offline policy.
+    # Do not forward credentials, PYTHONPATH or other uv/pip overrides/settings.
     keep = (
         "SYSTEMROOT",
         "WINDIR",
@@ -381,6 +383,7 @@ def _clean_environment(root: Path) -> dict[str, str]:
         "USERPROFILE",
         "LOCALAPPDATA",
         "APPDATA",
+        "UV_CACHE_DIR",
     )
     return {
         **{key: os.environ[key] for key in keep if key in os.environ},
