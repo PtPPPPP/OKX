@@ -131,6 +131,7 @@ def test_process_termination_semantics_before_and_after_commit() -> None:
     for variant in ("FULL", "NORMAL"):
         before = by_key[(variant, "before_commit")]
         after = by_key[(variant, "after_commit")]
+        assert before["actual_process_terminated"] and after["actual_process_terminated"]
         assert before["database_consistent"] and after["database_consistent"]
         assert before["probe_rows_after_kill"] == 0
         assert before["partial_transaction_present"] is False

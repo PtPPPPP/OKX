@@ -1,27 +1,28 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import ROUND_CEILING, ROUND_DOWN, Decimal
 from itertools import pairwise
-from math import pow
+from math import isfinite, pow
 from typing import Any, Protocol
 
 from app.config.run_config import RunConfig
 from app.config.settings import TradingMode
 from app.domain.events import EventBus
-from app.domain.market import Instrument
-from app.domain.order import OrderSide
+from app.domain.market import Candle, Instrument
+from app.domain.order import Order, OrderSide, OrderType
 from app.domain.position import Portfolio
 from app.domain.signal import Signal, SignalAction
-from app.execution.backtest_broker import Fill
+from app.execution.backtest_broker import ClosedTrade, Fill
 from app.execution.base import Broker
-from app.market.historical_data import BAR_INTERVALS
+from app.market.historical_data import BAR_INTERVALS, normalize_candles
 from app.market.providers import MarketDataProvider
 from app.position_sizing.base import PositionSizer
 from app.risk.risk_manager import RiskManager
 from app.runtime.clock import BacktestClock
-from app.strategies.base import Strategy
+from app.strategies.base import ProtectiveExitProvider, Strategy
 from app.trading_engine import (
     EngineRepository,
     EngineRiskState,
@@ -35,6 +36,14 @@ class BacktestExecutionBroker(Broker, Protocol):
     portfolio: Portfolio
     fills: list[Fill]
     closed_trade_pnls: list[Decimal]
+    closed_trades: list[ClosedTrade]
+
+    def register_signal(self, signal: Signal) -> None: ...
+    def begin_bar(self, candle: Candle) -> None: ...
+    def begin_intrabar(self, at: datetime) -> None: ...
+    def match_orders(self) -> list[Order]: ...
+
+    def unrealized_pnl(self, mark_price: Decimal) -> Decimal: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +74,7 @@ class BacktestResult:
     equity_curve: tuple[EquityPoint, ...]
     closed_trade_pnls: tuple[Decimal, ...]
     summary: dict[str, Any]
+    closed_trades: tuple[ClosedTrade, ...]
 
 
 class BacktestEngine:
@@ -85,16 +95,14 @@ class BacktestEngine:
         event_bus: EventBus,
         repository: EngineRepository | None = None,
     ) -> None:
-        self.run_id = run_id
-        self.config = config
-        self.instrument = instrument
-        self.provider = provider
-        self.strategy = strategy
-        self.position_sizer = position_sizer
-        self.risk_manager = risk_manager
-        self.broker = broker
-        self.clock = clock
+        self.run_id, self.config, self.instrument = run_id, config, instrument
+        self.provider, self.strategy, self.position_sizer = provider, strategy, position_sizer
+        self.risk_manager, self.broker, self.clock = risk_manager, broker, clock
         self.event_bus = event_bus
+        self._peak_equity = config.backtest.initial_capital
+        self._day_start_equity = config.backtest.initial_capital
+        self._recent_order_times: list[datetime] = []
+        self._protective_orders: dict[str, str] = {}
         self.trading_engine = TradingEngine(
             run_id=run_id,
             mode=TradingMode.BACKTEST,
@@ -108,7 +116,7 @@ class BacktestEngine:
             clock=clock,
             event_bus=event_bus,
             protective_exits=ProtectiveExitPolicy(
-                enabled=config.protective_exits.enabled,
+                enabled=False,  # Backtest brackets use OHLC below.
                 stop_loss_pct=config.protective_exits.stop_loss_pct,
                 take_profit_pct=config.protective_exits.take_profit_pct,
             ),
@@ -117,107 +125,99 @@ class BacktestEngine:
 
     def run(self) -> BacktestResult:
         candles = self.provider.get_historical_bars(
-            self.instrument.instrument_id,
-            self.config.market.bar,
-            limit=self.config.data.limit,
+            self.instrument.instrument_id, self.config.market.bar, limit=self.config.data.limit
         )
         if not candles:
             raise ValueError("回测没有可用 K 线")
         if any(not candle.confirmed for candle in candles):
             raise ValueError("回测数据只能包含已确认收盘 K 线")
-        interval = BAR_INTERVALS.get(self.config.market.bar.lower())
-        if interval is None:
-            raise ValueError(f"不支持的 K 线周期: {self.config.market.bar}")
-
+        candles = normalize_candles(candles, bar=self.config.market.bar)
+        interval = BAR_INTERVALS[self.config.market.bar.lower()]
         started_at = candles[0].timestamp
         self.clock.advance_to(started_at)
-        self.trading_engine.start()
-        pending_signals: list[Signal] = []
+        pending_signals: list[tuple[Signal, Decimal]] = []
         equity_curve: list[EquityPoint] = []
-        peak_equity = self.config.backtest.initial_capital
-        daily_realized: dict[date, Decimal] = {}
-
-        for candle in candles:
-            self.clock.advance_to(candle.timestamp)
-            if pending_signals:
-                before = self.broker.portfolio.realized_pnl
-                for signal in pending_signals:
-                    equity = self.broker.portfolio.equity(
+        previous_equity = self.config.backtest.initial_capital
+        previous_day: date | None = None
+        self.trading_engine.start()
+        try:
+            for candle in candles:
+                self.clock.advance_to(candle.timestamp)
+                if candle.timestamp.date() != previous_day:
+                    self._day_start_equity = previous_equity
+                    previous_day = candle.timestamp.date()
+                self.broker.begin_bar(candle)
+                state = self._risk_state(candle.open)
+                if (
+                    state.daily_pnl is not None
+                    and state.daily_pnl <= -self.config.risk.max_daily_loss
+                ) or (
+                    state.drawdown_pct is not None
+                    and state.drawdown_pct >= self.config.risk.max_drawdown_pct
+                ):
+                    self._cancel_orders(candle, side=OrderSide.BUY)
+                protective = self._protective_exit(candle, intrabar=False)
+                self._notify_matches(candle, candle.open)
+                if not protective:
+                    for signal, limit_price in pending_signals:
+                        self._execute(signal, candle, candle.open, limit_price=limit_price)
+                pending_signals.clear()
+                # Already-known brackets can trigger inside this bar. An entry
+                # with unknown intrabar fill time is not protected retroactively.
+                self.clock.advance_to(candle.timestamp + interval)
+                self.broker.begin_intrabar(self.clock.now())
+                protective = self._protective_exit(candle, intrabar=True) or protective
+                self._notify_matches(candle, candle.close)
+                equity = self._equity(candle.close)
+                self._peak_equity = max(self._peak_equity, equity)
+                equity_curve.append(
+                    EquityPoint(
+                        self.run_id,
+                        self.strategy.name,
                         self.instrument.instrument_id,
-                        self.instrument.base_currency,
-                        self.instrument.quote_currency,
-                        candle.open,
-                    )
-                    drawdown = (
-                        (peak_equity - equity) / peak_equity * Decimal("100")
-                        if peak_equity > 0
-                        else Decimal("0")
-                    )
-                    self.trading_engine.execute_signal(
-                        signal,
-                        candle,
-                        execution_price=candle.open,
-                        risk_state=EngineRiskState(
-                            daily_pnl=daily_realized.get(candle.timestamp.date(), Decimal("0")),
-                            drawdown_pct=drawdown,
+                        self.config.market.bar,
+                        self.clock.now(),
+                        equity,
+                        self.broker.portfolio.balances.get(
+                            self.instrument.quote_currency, Decimal("0")
                         ),
-                        submit_orders=True,
+                        self.broker.portfolio.positions.get(
+                            self.instrument.instrument_id, Decimal("0")
+                        ),
+                        candle.close,
                     )
-                change = self.broker.portfolio.realized_pnl - before
-                if change:
-                    trade_date = candle.timestamp.date()
-                    daily_realized[trade_date] = (
-                        daily_realized.get(trade_date, Decimal("0")) + change
-                    )
-                pending_signals = []
-
-            equity = self.broker.portfolio.equity(
-                self.instrument.instrument_id,
-                self.instrument.base_currency,
-                self.instrument.quote_currency,
-                candle.close,
-            )
-            peak_equity = max(peak_equity, equity)
-            equity_curve.append(
-                EquityPoint(
-                    run_id=self.run_id,
-                    strategy_name=self.strategy.name,
-                    instrument_id=self.instrument.instrument_id,
-                    bar=self.config.market.bar,
-                    timestamp=candle.timestamp,
-                    equity=equity,
-                    quote_balance=self.broker.portfolio.balances.get(
-                        self.instrument.quote_currency, Decimal("0")
-                    ),
-                    base_quantity=self.broker.portfolio.positions.get(
-                        self.instrument.instrument_id, Decimal("0")
-                    ),
-                    mark_price=candle.close,
                 )
-            )
-
-            self.clock.advance_to(candle.timestamp + interval)
-            signals = self.trading_engine.generate_signals(candle)
-            pending_signals.extend(
-                signal for signal in signals if signal.action is not SignalAction.HOLD
-            )
-
-        self.trading_engine.stop()
-        completed_at = self.clock.now()
+                previous_equity = equity
+                signals = self.trading_engine.generate_signals(candle)
+                if not protective:
+                    pending_signals.extend(
+                        (signal, candle.close)
+                        for signal in signals
+                        if signal.action is not SignalAction.HOLD
+                    )
+            pending_at_end = len(self.broker.get_open_orders())
+            self._cancel_orders(candles[-1])
+        finally:
+            self.trading_engine.stop()
         final_equity = equity_curve[-1].equity
+        quantity = self.broker.portfolio.positions.get(self.instrument.instrument_id, Decimal("0"))
         summary = _summary(
             started_at,
-            completed_at,
+            self.clock.now(),
             self.config.backtest.initial_capital,
             final_equity,
             self.broker.fills,
             equity_curve,
             self.broker.closed_trade_pnls,
-            self.broker.portfolio.positions.get(self.instrument.instrument_id, Decimal("0")) > 0,
+            quantity > 0,
             signal_count=self.trading_engine.signal_count,
             actionable_signal_count=self.trading_engine.actionable_signal_count,
             approved_order_count=self.trading_engine.approved_order_count,
             submitted_order_count=self.trading_engine.submitted_order_count,
+            closed_trades=self.broker.closed_trades,
+            realized_pnl=self.broker.portfolio.realized_pnl,
+            unrealized_pnl=self.broker.unrealized_pnl(candles[-1].close),
+            pending_at_end=pending_at_end,
         )
         return BacktestResult(
             run_id=self.run_id,
@@ -226,14 +226,141 @@ class BacktestEngine:
             instrument_id=self.instrument.instrument_id,
             bar=self.config.market.bar,
             started_at=started_at,
-            completed_at=completed_at,
+            completed_at=self.clock.now(),
             initial_capital=self.config.backtest.initial_capital,
             final_equity=final_equity,
             fills=tuple(self.broker.fills),
             equity_curve=tuple(equity_curve),
             closed_trade_pnls=tuple(self.broker.closed_trade_pnls),
             summary=summary,
+            closed_trades=tuple(self.broker.closed_trades),
         )
+
+    def _equity(self, price: Decimal) -> Decimal:
+        return self.broker.portfolio.equity(
+            self.instrument.instrument_id,
+            self.instrument.base_currency,
+            self.instrument.quote_currency,
+            price,
+        )
+
+    def _risk_state(self, price: Decimal) -> EngineRiskState:
+        equity = self._equity(price)
+        self._peak_equity = max(self._peak_equity, equity)
+        return EngineRiskState(
+            daily_pnl=equity - self._day_start_equity,
+            drawdown_pct=(self._peak_equity - equity) / self._peak_equity * Decimal("100")
+            if self._peak_equity > 0
+            else Decimal("0"),
+            recent_order_times=tuple(self._recent_order_times),
+        )
+
+    def _execute(
+        self,
+        signal: Signal,
+        candle: Candle,
+        price: Decimal,
+        *,
+        limit_price: Decimal | None = None,
+        order_type: OrderType = OrderType.LIMIT,
+    ) -> Order | None:
+        self.broker.register_signal(signal)
+        execution = self.trading_engine.execute_signal(
+            signal,
+            candle,
+            execution_price=price,
+            risk_state=self._risk_state(price),
+            submit_orders=True,
+            limit_price=limit_price,
+            order_type=order_type,
+        )
+        order = execution.order if execution is not None else None
+        if order is not None:
+            self._recent_order_times.append(self.clock.now())
+        return order
+
+    def _notify_matches(self, candle: Candle, price: Decimal) -> None:
+        for order in self.broker.match_orders():
+            self.trading_engine.record_order_update(order, candle, price)
+
+    def _cancel_orders(self, candle: Candle, *, side: OrderSide | None = None) -> None:
+        for order in self.broker.get_open_orders():
+            if side is None or order.request.side is side:
+                cancelled = self.broker.cancel_order(
+                    self.instrument.instrument_id, order.request.client_order_id
+                )
+                self.trading_engine.record_order_update(cancelled, candle, candle.open)
+
+    def _protective_exit(self, candle: Candle, *, intrabar: bool) -> bool:
+        policy = self.config.protective_exits
+        entry = self.broker.portfolio.average_entry_prices.get(self.instrument.instrument_id)
+        if entry is None:
+            return False
+        stop_price: Decimal | None = None
+        take_price: Decimal | None = None
+        take_reason = "take_profit"
+        if isinstance(self.strategy, ProtectiveExitProvider):
+            levels = self.strategy.protective_exit_levels(entry)
+            stop_price, take_price = levels.stop_price, levels.take_profit_price
+            take_reason = levels.take_profit_reason
+        if policy.enabled:
+            fixed_stop = entry * (Decimal("1") - policy.stop_loss_pct / Decimal("100"))
+            fixed_take = entry * (Decimal("1") + policy.take_profit_pct / Decimal("100"))
+            stop_price = max(stop_price, fixed_stop) if stop_price is not None else fixed_stop
+            if take_price is None or fixed_take < take_price:
+                take_price, take_reason = fixed_take, "take_profit"
+        if stop_price is None and take_price is None:
+            return False
+        open_orders = self.broker.get_open_orders()
+        if any(
+            self._protective_orders.get(order.request.client_order_id) == "stop_loss"
+            for order in open_orders
+        ):
+            return True
+        tick = self.instrument.price_tick
+        stop = (
+            (stop_price / tick).to_integral_value(rounding=ROUND_DOWN) * tick
+            if stop_price is not None
+            else None
+        )
+        take = (
+            (take_price / tick).to_integral_value(rounding=ROUND_CEILING) * tick
+            if take_price is not None
+            else None
+        )
+        low = candle.low if intrabar else candle.open
+        high = candle.high if intrabar else candle.open
+        if stop is not None and low <= stop:
+            reason, order_type = "stop_loss", OrderType.MARKET
+            price = stop if intrabar else candle.open
+            limit_price = None
+        elif take is not None and high >= take:
+            reason, order_type = take_reason, OrderType.LIMIT
+            price = take if intrabar else candle.open
+            limit_price = take
+        else:
+            return False
+        if any(
+            self._protective_orders.get(order.request.client_order_id) == reason
+            for order in open_orders
+        ):
+            return True
+        self._cancel_orders(candle)
+        signal = Signal(
+            signal_id=f"{self.run_id}:{candle.timestamp.isoformat()}:{reason}",
+            strategy_name=self.strategy.name,
+            instrument_id=self.instrument.instrument_id,
+            action=SignalAction.CLOSE,
+            timestamp=self.clock.now(),
+            reason=reason,
+            confidence=Decimal("1"),
+            metadata={"protective_exit": True, "exit_reason": reason, "candle_confirmed": True},
+        )
+        self.trading_engine.record_signal(signal)
+        order = self._execute(signal, candle, price, limit_price=limit_price, order_type=order_type)
+        if order is not None:
+            self._protective_orders[order.request.client_order_id] = reason
+        return True
 
 
 def _summary(
@@ -250,6 +377,10 @@ def _summary(
     actionable_signal_count: int,
     approved_order_count: int,
     submitted_order_count: int,
+    closed_trades: list[ClosedTrade],
+    realized_pnl: Decimal,
+    unrealized_pnl: Decimal,
+    pending_at_end: int,
 ) -> dict[str, Any]:
     wins = [pnl for pnl in closed_pnls if pnl > 0]
     losses = [pnl for pnl in closed_pnls if pnl < 0]
@@ -257,15 +388,15 @@ def _summary(
     gross_loss = abs(sum(losses, start=Decimal("0")))
     duration_seconds = (completed_at - started_at).total_seconds()
     periods_per_year = (
-        (len(curve) - 1) * 365 * 24 * 60 * 60 / duration_seconds
-        if duration_seconds > 0 and len(curve) > 1
-        else 0.0
+        len(curve) * 365 * 24 * 60 * 60 / duration_seconds if duration_seconds > 0 else 0.0
     )
+    equities = [initial_capital, *[point.equity for point in curve]]
     returns = [
-        (current.equity - previous.equity) / previous.equity
-        for previous, current in pairwise(curve)
-        if previous.equity > 0
+        (current - previous) / previous for previous, current in pairwise(equities) if previous > 0
     ]
+    exit_counts = Counter(trade.exit_reason for trade in closed_trades)
+    average_win = gross_profit / Decimal(len(wins)) if wins else None
+    average_loss = gross_loss / Decimal(len(losses)) if losses else None
     return {
         "started_at": started_at.isoformat(),
         "completed_at": completed_at.isoformat(),
@@ -277,7 +408,7 @@ def _summary(
         "annualized_return_pct": _annualized_return(
             initial_capital, final_equity, started_at, completed_at
         ),
-        "maximum_drawdown_pct": maximum_drawdown([point.equity for point in curve]),
+        "maximum_drawdown_pct": maximum_drawdown(equities),
         "sharpe_ratio": sharpe_ratio(returns, periods_per_year),
         "signal_count": signal_count,
         "actionable_signal_count": actionable_signal_count,
@@ -292,10 +423,25 @@ def _summary(
         "win_rate_pct": Decimal(len(wins)) / Decimal(len(closed_pnls)) * Decimal("100")
         if closed_pnls
         else None,
-        "profit_loss_ratio": gross_profit / gross_loss if gross_loss else None,
+        "profit_loss_ratio": average_win / average_loss
+        if average_win is not None and average_loss
+        else None,
         "profit_factor": gross_profit / gross_loss if gross_loss else None,
-        "average_holding_time_hours": None,
-        "exit_reason_percentages": {},
+        "average_holding_time_hours": sum(
+            (trade.holding_time_hours for trade in closed_trades), start=Decimal("0")
+        )
+        / Decimal(len(closed_trades))
+        if closed_trades
+        else None,
+        "exit_reason_percentages": {
+            reason: Decimal(count) / Decimal(len(closed_trades)) * Decimal("100")
+            for reason, count in sorted(exit_counts.items())
+        },
+        "realized_pnl": realized_pnl,
+        "unrealized_pnl": unrealized_pnl,
+        "net_pnl": final_equity - initial_capital,
+        "pending_order_count_at_end": pending_at_end,
+        "execution_model": "ohlc_limit_v2",
         "total_fees": sum((fill.fee for fill in fills), start=Decimal("0")),
         "slippage_cost": sum((fill.slippage_cost for fill in fills), start=Decimal("0")),
         "max_consecutive_losses": _max_consecutive_losses(closed_pnls),
@@ -321,10 +467,15 @@ def _annualized_return(
     final_equity: Decimal,
     started_at: datetime,
     completed_at: datetime,
-) -> Decimal:
+) -> Decimal | None:
     duration_seconds = (completed_at - started_at).total_seconds()
-    if initial_capital <= 0 or final_equity <= 0 or duration_seconds <= 0:
-        return Decimal("0")
+    if initial_capital <= 0 or duration_seconds <= 0:
+        return None
+    if final_equity == 0:
+        return Decimal("-100")
     years = duration_seconds / (365 * 24 * 60 * 60)
-    value = (pow(float(final_equity / initial_capital), 1 / years) - 1) * 100
-    return Decimal(str(value))
+    try:
+        value = (pow(float(final_equity / initial_capital), 1 / years) - 1) * 100
+    except OverflowError:
+        return None
+    return Decimal(str(value)) if isfinite(value) else None

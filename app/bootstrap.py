@@ -85,6 +85,7 @@ def build_backtest_session(config: RunConfig, settings: Settings) -> TradingSess
             instrument,
             config.backtest.fee_rate,
             config.backtest.slippage_rate,
+            volume_participation=config.backtest.volume_participation,
         )
         database = Database(settings.database_url)
         database.initialize()
@@ -149,6 +150,10 @@ def build_backtest_session(config: RunConfig, settings: Settings) -> TradingSess
                     *[
                         {"record_type": "fill", "payload": asdict(fill), **dimensions}
                         for fill in result.fills
+                    ],
+                    *[
+                        {"record_type": "closed_trade", "payload": asdict(trade), **dimensions}
+                        for trade in result.closed_trades
                     ],
                     *[
                         {

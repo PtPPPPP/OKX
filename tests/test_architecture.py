@@ -123,7 +123,7 @@ def test_brokers_accept_same_approved_order_model(btc_instrument: Instrument) ->
     portfolio = Portfolio({"USDT": Decimal("100")}, {btc_instrument.instrument_id: Decimal("0")})
     backtest = BacktestBroker(portfolio, btc_instrument, Decimal("0.001"), Decimal("0.0005"))
     demo = OKXDemoBroker(cast(OkxClient, FakeClient()), cast(TradingRepository, FakeRepository()))
-    assert backtest.submit_order(approved).state is OrderState.FILLED
+    assert backtest.submit_order(approved).state is OrderState.ACCEPTED
     with pytest.raises(PermissionError, match="Proposal gate"):
         demo.submit_order(approved)
 

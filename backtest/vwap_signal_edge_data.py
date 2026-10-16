@@ -272,8 +272,16 @@ class OKXHistoricalCandleDownloader:
         page_limit: int = _PAGE_LIMIT,
         clock: Callable[[], datetime] | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        maximum_batches: int | None = None,
+        request_interval_seconds: float = 0.0,
     ) -> None:
-        if network.mode is not NetworkMode.PROXY:
+        if maximum_batches is not None and not 1 <= maximum_batches <= 4096:
+            raise ValueError("maximum_batches must be in 1..4096")
+        if request_interval_seconds < 0:
+            raise ValueError("request_interval_seconds cannot be negative")
+        if network.mode is not NetworkMode.PROXY and not (
+            network.mode is NetworkMode.DIRECT and maximum_batches is not None
+        ):
             raise ValueError("long-running research download requires explicit proxy mode")
         if retry_limit < 0:
             raise ValueError("retry_limit cannot be negative")
@@ -289,6 +297,8 @@ class OKXHistoricalCandleDownloader:
         self.page_limit = page_limit
         self.clock = clock or (lambda: datetime.now(UTC))
         self.sleep = sleep
+        self.maximum_batches = maximum_batches
+        self.request_interval_seconds = request_interval_seconds
 
     def close(self) -> None:
         close = getattr(self.transport, "close", None)
@@ -335,10 +345,15 @@ class OKXHistoricalCandleDownloader:
         failures = _state_int(self.cache, "download_failures")
         retries = _state_int(self.cache, "retry_count")
         duplicates = _state_int(self.cache, "duplicate_count")
-        while after > start_ms:
+        session_batches = 0
+        while after > start_ms and (
+            self.maximum_batches is None or session_batches < self.maximum_batches
+        ):
             payload: dict[str, Any] | None = None
             for attempt in range(self.retry_limit + 1):
                 try:
+                    if self.request_interval_seconds:
+                        self.sleep(self.request_interval_seconds)
                     response = self.transport.get(
                         _ENDPOINT,
                         params={
@@ -381,6 +396,7 @@ class OKXHistoricalCandleDownloader:
             in_range = [row for row in page if start_ms <= row.timestamp_ms <= end_ms]
             duplicates += self.cache.commit_page(in_range, next_after=oldest)
             batches += 1
+            session_batches += 1
             self.cache.set_state("download_batches", batches)
             self.cache.set_state("duplicate_count", duplicates)
             after = oldest
@@ -486,12 +502,16 @@ def _manifest(
     timestamps = [row.timestamp_ms for row in confirmed]
     out_of_order = sum(b <= a for a, b in pairwise(timestamps))
     interval_ms = int(interval.total_seconds() * 1000)
-    missing: list[str] = []
-    for earlier, later in pairwise(timestamps):
-        cursor = earlier + interval_ms
-        while cursor < later:
-            missing.append(datetime.fromtimestamp(cursor / 1000, tz=UTC).isoformat())
-            cursor += interval_ms
+    # A contiguous suffix is not a complete request. Check leading/trailing
+    # coverage as well as internal gaps, including interrupted bounded runs.
+    present = set(timestamps)
+    missing = [
+        datetime.fromtimestamp(stamp / 1000, tz=UTC).isoformat()
+        for stamp in range(
+            int(start.timestamp() * 1000), int(end.timestamp() * 1000) + 1, interval_ms
+        )
+        if stamp not in present
+    ]
     canonical = [
         {
             "timestamp_ms": row.timestamp_ms,

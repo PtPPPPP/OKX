@@ -13,6 +13,7 @@ from app.domain.context import StrategyContext
 from app.domain.market import Candle, InstrumentType
 from app.domain.order import Order, OrderSide, OrderState
 from app.domain.signal import Signal, SignalAction
+from app.strategies.base import ProtectiveExitLevels
 
 
 class VWAPMeanReversionParameters(BaseModel):
@@ -236,6 +237,19 @@ class VWAPMeanReversionStrategy:
             "state": self.state.snapshot(),
             "active_order": self._active_order,
         }
+
+    def protective_exit_levels(self, entry_price: Decimal) -> ProtectiveExitLevels:
+        """Pure levels from prior confirmed bars, consumed by the offline runner."""
+        fixed = entry_price * (Decimal("1") - self.parameters.fixed_stop_pct)
+        atr = _atr(self._bars, self.parameters.atr_period)
+        stop = (
+            max(fixed, entry_price - atr * self.parameters.atr_multiplier)
+            if atr is not None
+            else fixed
+        )
+        return ProtectiveExitLevels(
+            stop, _vwap(self._bars, self.parameters.vwap_window), "vwap_take_profit"
+        )
 
     def restore_state(self, snapshot: dict[str, Any]) -> None:
         self._bar_index = int(snapshot.get("bar_index", 0))

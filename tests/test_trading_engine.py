@@ -3,10 +3,14 @@ from __future__ import annotations
 from datetime import timedelta
 from decimal import Decimal
 
+import pytest
+
 from app.config.settings import TradingMode
 from app.domain.events import EventBus
 from app.domain.market import Instrument
+from app.domain.order import OrderType
 from app.domain.position import Portfolio
+from app.domain.signal import Signal, SignalAction
 from app.execution.read_only_broker import ReadOnlyBroker
 from app.position_sizing.fixed_notional import FixedNotionalPositionSizer
 from app.risk.risk_manager import default_risk_manager
@@ -70,4 +74,50 @@ def test_observe_path_runs_sizing_and_risk_without_submitting(
     assert execution.risk_decision.allowed
     assert execution.order is None
     assert engine.approved_order_count == 1
+    assert engine.submitted_order_count == 0
+
+
+def test_demo_cannot_use_backtest_market_exit_option(btc_instrument: Instrument) -> None:
+    candle = make_candles(["100"])[0]
+    clock = BacktestClock(candle.timestamp + timedelta(minutes=5))
+    engine = TradingEngine(
+        run_id="demo",
+        mode=TradingMode.DEMO,
+        bar="5m",
+        instrument=btc_instrument,
+        strategy=create_strategy("buy_and_hold", {}, btc_instrument),
+        position_sizer=FixedNotionalPositionSizer(Decimal("20")),
+        risk_manager=default_risk_manager(
+            maximum_order_notional=Decimal("20"),
+            maximum_exposure=Decimal("100"),
+            maximum_daily_loss=Decimal("10"),
+            maximum_drawdown_pct=Decimal("5"),
+            maximum_orders_per_minute=2,
+            stale_after_seconds=600,
+        ),
+        broker=ReadOnlyBroker(),
+        portfolio=Portfolio({"USDT": Decimal("100")}),
+        clock=clock,
+        event_bus=EventBus(),
+        protective_exits=ProtectiveExitPolicy(False, Decimal("1"), Decimal("2")),
+    )
+    signal = Signal(
+        "stop",
+        "buy_and_hold",
+        "BTC-USDT",
+        SignalAction.CLOSE,
+        clock.now(),
+        "stop_loss",
+        Decimal("1"),
+        metadata={"protective_exit": True},
+    )
+    with pytest.raises(ValueError, match="仅允许离线回测"):
+        engine.execute_signal(
+            signal,
+            candle,
+            execution_price=Decimal("99"),
+            risk_state=EngineRiskState(Decimal("0"), Decimal("0")),
+            submit_orders=True,
+            order_type=OrderType.MARKET,
+        )
     assert engine.submitted_order_count == 0

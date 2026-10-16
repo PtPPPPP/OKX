@@ -93,18 +93,21 @@ class BacktestConfig(StrictModel):
     initial_capital: Decimal = Field(default=Decimal("10000"), ge=0)
     fee_rate: Decimal = Field(default=Decimal("0.001"), ge=0, lt=1)
     slippage_rate: Decimal = Field(default=Decimal("0.0005"), ge=0, lt=1)
+    volume_participation: Decimal = Field(default=Decimal("1"), gt=0, le=1)
     seed: int = 0
 
 
 class DataConfig(StrictModel):
     source: Literal["okx", "csv"] = "okx"
     path: Path | None = None
-    limit: int = Field(default=300, gt=0, le=1000)
+    limit: int = Field(default=300, gt=0)
     output: Path = Path("data/market_data.csv")
     instrument_snapshot: Path | None = None
 
     @model_validator(mode="after")
     def validate_source(self) -> DataConfig:
+        if self.source == "okx" and self.limit > 1000:
+            raise ValueError("OKX 常规历史入口最多读取 1000 根 K 线；长历史使用研究下载器")
         if self.source == "csv" and self.path is None:
             raise ValueError("CSV 数据源必须配置 path")
         return self

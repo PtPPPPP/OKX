@@ -21,7 +21,7 @@ flowchart LR
 
 ## 三种 Runner
 
-- 回测 Runner：历史 Provider 输入已确认 K 线，信号在下一根 K 线开盘执行，使用 `BacktestBroker`。
+- 回测 Runner：历史 Provider 输入已确认 K 线，收盘信号从下一根 K 线开始限价撮合，使用 `BacktestBroker`。订单可挂起或部分成交；保护退出按已知价位和 OHLC 处理，具体假设见 [回测口径](backtest-correctness.md)。
 - 模拟盘单次评估 Runner：先同步账户和对账，再用 `ReadOnlyBroker` 计算信号、仓位和风控，绝不下单。
 - 公共观察 Runner：从公共 WebSocket 接收已确认 K 线，账户风险值未知时按 fail closed 拒绝，使用 `ReadOnlyBroker`。
 

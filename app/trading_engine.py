@@ -126,24 +126,27 @@ class TradingEngine:
         if protective is not None:
             signals = [protective]
         for signal in signals:
-            self.signal_count += 1
-            if signal.action is not SignalAction.HOLD:
-                self.actionable_signal_count += 1
-            if self.repository is not None:
-                self.repository.save_signal(signal)
-            self._publish(
-                "SignalGenerated",
-                signal.timestamp,
-                {
-                    "signal_id": signal.signal_id,
-                    "action": signal.action.value,
-                    "reason": signal.reason,
-                    "confidence": str(signal.confidence),
-                    "metadata": signal.metadata,
-                },
-                self._signal_key(signal),
-            )
+            self.record_signal(signal)
         return signals
+
+    def record_signal(self, signal: Signal) -> None:
+        self.signal_count += 1
+        if signal.action is not SignalAction.HOLD:
+            self.actionable_signal_count += 1
+        if self.repository is not None:
+            self.repository.save_signal(signal)
+        self._publish(
+            "SignalGenerated",
+            signal.timestamp,
+            {
+                "signal_id": signal.signal_id,
+                "action": signal.action.value,
+                "reason": signal.reason,
+                "confidence": str(signal.confidence),
+                "metadata": signal.metadata,
+            },
+            self._signal_key(signal),
+        )
 
     def execute_signal(
         self,
@@ -153,13 +156,26 @@ class TradingEngine:
         execution_price: Decimal,
         risk_state: EngineRiskState,
         submit_orders: bool,
+        limit_price: Decimal | None = None,
+        order_type: OrderType = OrderType.LIMIT,
     ) -> EngineExecution | None:
         if signal.action is SignalAction.HOLD:
             return None
-        price = _quantize_price(execution_price, self.instrument.price_tick)
-        market = MarketSnapshot(candle, price)
+        if order_type is not OrderType.LIMIT and not (
+            self.mode is TradingMode.BACKTEST
+            and signal.action in {SignalAction.SELL, SignalAction.CLOSE}
+            and signal.metadata.get("protective_exit")
+            and order_type is OrderType.MARKET
+        ):
+            raise ValueError("非限价单仅允许离线回测显式保护性减仓")
+        price = _quantize_price(
+            execution_price if limit_price is None else limit_price, self.instrument.price_tick
+        )
+        market = MarketSnapshot(candle, execution_price)
         snapshot = self.portfolio.snapshot()
-        size = self.position_sizer.calculate(signal, snapshot, market, self.instrument)
+        size = self.position_sizer.calculate(
+            signal, snapshot, MarketSnapshot(candle, price), self.instrument
+        )
         self._publish(
             "PositionSizeCalculated",
             self.clock.now(),
@@ -178,7 +194,7 @@ class TradingEngine:
             strategy_name=self.strategy.name,
             instrument_id=self.instrument.instrument_id,
             side=side,
-            order_type=OrderType.LIMIT,
+            order_type=order_type,
             quantity=size.quantity,
             price=price,
             signal_id=signal.signal_id,
@@ -237,21 +253,24 @@ class TradingEngine:
                 )
                 order = self.broker.submit_order(approved)
                 self.submitted_order_count += 1
-                if self.repository is not None:
-                    self.repository.save_order(order)
-                self.strategy.on_order_update(self._context(market), order)
-                self._publish(
-                    "OrderEvent",
-                    self.clock.now(),
-                    {
-                        "client_order_id": order.request.client_order_id,
-                        "state": order.state.value,
-                        "filled_quantity": str(order.filled_quantity),
-                        "average_price": str(order.average_price),
-                    },
-                    f"order:{order.request.client_order_id}:{order.state.value}",
-                )
+                self.record_order_update(order, candle, execution_price)
         return EngineExecution(signal, size, proposed, decision, order)
+
+    def record_order_update(self, order: Order, candle: Candle, market_price: Decimal) -> None:
+        if self.repository is not None:
+            self.repository.save_order(order)
+        self.strategy.on_order_update(self._context(MarketSnapshot(candle, market_price)), order)
+        self._publish(
+            "OrderEvent",
+            self.clock.now(),
+            {
+                "client_order_id": order.request.client_order_id,
+                "state": order.state.value,
+                "filled_quantity": str(order.filled_quantity),
+                "average_price": str(order.average_price),
+            },
+            f"order:{order.request.client_order_id}:{order.state.value}:{order.filled_quantity}",
+        )
 
     def _order_source(self, signal: Signal) -> OrderSource:
         if self.mode is TradingMode.BACKTEST:

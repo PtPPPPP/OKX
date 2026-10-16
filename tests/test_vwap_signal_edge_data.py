@@ -138,3 +138,41 @@ def test_resume_rejects_cache_from_different_request(tmp_path: Path) -> None:
         downloader.download(
             instrument="ETH-USDT", bar="1h", start=start, end=start + timedelta(hours=1)
         )
+
+
+def test_bounded_direct_download_is_partial_until_full_requested_range_exists(
+    tmp_path: Path,
+) -> None:
+    direct = NetworkConfiguration.from_environment({"OKX_NETWORK_MODE": "direct"})
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    rows = [_row(start + timedelta(hours=index)) for index in range(4)]
+    cache = HistoricalCandleCache(tmp_path / "cache")
+    first = OKXHistoricalCandleDownloader(
+        cache,
+        network=direct,
+        transport=_PagedTransport([list(reversed(rows[2:]))]),
+        page_limit=2,
+        maximum_batches=1,
+    ).download(instrument="BTC-USDT", bar="1h", start=start, end=start + timedelta(hours=3))
+    assert first.status == "quality_failed"
+    assert first.missing_count == 2  # leading coverage must not be mistaken for completeness
+    second = OKXHistoricalCandleDownloader(
+        cache,
+        network=direct,
+        transport=_PagedTransport([list(reversed(rows[:2]))]),
+        page_limit=2,
+        maximum_batches=1,
+    ).download(instrument="BTC-USDT", bar="1h", start=start, end=start + timedelta(hours=3))
+    assert second.status == "complete" and second.normalized_rows == 4
+
+
+def test_trailing_missing_candle_is_a_quality_failure(tmp_path: Path) -> None:
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    result = OKXHistoricalCandleDownloader(
+        HistoricalCandleCache(tmp_path),
+        network=_network(),
+        transport=_PagedTransport([[_row(start)]]),
+        page_limit=2,
+    ).download(instrument="BTC-USDT", bar="1h", start=start, end=start + timedelta(hours=1))
+    assert result.missing_count == 1
+    assert result.status == "quality_failed"

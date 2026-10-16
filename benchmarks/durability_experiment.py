@@ -28,7 +28,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -243,7 +243,7 @@ def _variant(
 
 _CRASH_CHILD = """
 from pathlib import Path
-import sqlite3, sys
+import os, sqlite3, sys
 from app.storage.database import Database
 
 db, mode, phase, marker = sys.argv[1], int(sys.argv[2]), sys.argv[3], Path(sys.argv[4])
@@ -259,13 +259,12 @@ connection.execute("BEGIN IMMEDIATE")
 connection.execute("CREATE TABLE IF NOT EXISTS crash_probe(id INTEGER PRIMARY KEY, tag TEXT)")
 connection.execute("INSERT INTO crash_probe(tag) VALUES ('txn_row_1')")
 connection.execute("INSERT INTO crash_probe(tag) VALUES ('txn_row_2')")
-if phase == "before_commit":
-    marker.write_text("waiting_uncommitted", encoding="ascii")
-    sys.stdin.buffer.read()
-else:
+if phase == "after_commit":
     connection.commit()
-    marker.write_text("waiting_committed", encoding="ascii")
-    sys.stdin.buffer.read()
+ready = marker.with_suffix(".ready")
+ready.write_text(str(os.getpid()), encoding="ascii")
+ready.replace(marker)
+sys.stdin.buffer.read()
 """
 
 
@@ -279,12 +278,17 @@ def process_termination_experiment() -> list[dict[str, Any]]:
                 database = workspace / "crash.db"
                 marker = workspace / "marker.txt"
                 environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+                # Windows venv python.exe is a redirector: terminating that PID
+                # leaves the interpreter holding WAL mappings alive. Launch the
+                # actual interpreter and retain the parent venv's import paths.
+                executable = sys._base_executable if os.name == "nt" else sys.executable
+                child_code = f"import sys; sys.path = {sys.path!r}\n" + _CRASH_CHILD
                 child = subprocess.Popen(
                     [
-                        sys.executable,
+                        executable,
                         "-u",
                         "-c",
-                        _CRASH_CHILD,
+                        child_code,
                         str(database),
                         str(mode),
                         phase,
@@ -306,6 +310,9 @@ def process_termination_experiment() -> list[dict[str, Any]]:
                             )
                         time.sleep(0.02)
                     assert marker.exists(), "crash child never reached the wait point"
+                    actual_pid = int(marker.read_text(encoding="ascii"))
+                    if actual_pid != child.pid:
+                        raise RuntimeError("crash probe must terminate the actual interpreter")
                 finally:
                     child.terminate()
                     try:
@@ -313,8 +320,11 @@ def process_termination_experiment() -> list[dict[str, Any]]:
                     except subprocess.TimeoutExpired:
                         child.kill()
                         child.wait(timeout=10)
+                    for pipe in (child.stdin, child.stdout, child.stderr):
+                        if pipe is not None:
+                            pipe.close()
 
-                with sqlite3.connect(database) as connection:
+                with closing(sqlite3.connect(database)) as connection:
                     integrity = str(connection.execute("PRAGMA integrity_check").fetchone()[0])
                     table_present = bool(
                         connection.execute(
@@ -332,6 +342,7 @@ def process_termination_experiment() -> list[dict[str, Any]]:
                         "model": "process_termination",
                         "variant": _MODE_NAMES[mode],
                         "phase": phase,
+                        "actual_process_terminated": actual_pid == child.pid,
                         "database_consistent": integrity == "ok",
                         "integrity_check": integrity,
                         "probe_table_present": table_present,

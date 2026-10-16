@@ -46,6 +46,7 @@ def run_engine(
                 "bar": "5m",
             },
             "strategy": {"name": strategy_name, "parameters": parameters},
+            "protective_exits": {"enabled": False},
             "data": {"source": "okx", "limit": len(candles)},
         }
     )
@@ -115,9 +116,11 @@ def test_last_bar_signal_is_not_filled(btc_instrument: Instrument) -> None:
 
 
 def test_fee_slippage_and_non_negative_portfolio(btc_instrument: Instrument) -> None:
-    result = run_engine(btc_instrument, "buy_and_hold", {}, make_candles(["100", "100", "100"]))
+    result = run_engine(btc_instrument, "buy_and_hold", {}, make_candles(["101", "100", "100"]))
     fill = result.fills[0]
-    assert fill.fill_price == fill.reference_price * Decimal("1.0005")
+    assert fill.reference_price == Decimal("100")
+    assert fill.fill_price == Decimal("100.1")  # adverse slippage rounded to tick, within 101 limit
+    assert fill.slippage_cost == Decimal("0.1") * fill.quantity
     assert fill.fee == fill.notional * Decimal("0.001")
     assert all(point.quote_balance >= 0 for point in result.equity_curve)
     assert all(point.base_quantity >= 0 for point in result.equity_curve)

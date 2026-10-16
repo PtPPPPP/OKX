@@ -14,19 +14,19 @@ production-ready 或 live-trading-ready。
 | 项目 | 状态 |
 |---|---|
 | 当前版本 | `0.3.0` |
-| Git 基线 | 首次审计提交已建立并推送到 `main` |
+| Git 基线 | 历史提交记录见 Phase 3C；当前工作目录不含 `.git` |
 | Safety / Correctness | Phase 0/1 已完成 |
 | Performance | Phase 2 已封板，`STOP_PHASE_2_PERFORMANCE_WORK` |
 | Engineering Baseline | Phase 3A 已完成 |
 | CI Integration | Phase 3B 已完成 |
 | First Commit Safety Audit | Phase 3C 已完成，`BLOCKER=0`、`P1=0` |
-| 本地完整质量门 | 703/703 tests、80/80 security smoke，通过 |
-| 干净 clone 基线 | 698/698 tests、80/80 security smoke，通过 |
+| 本地完整质量门 | 本次 Windows 验证 782/782 tests、80/80 security smoke，通过 |
+| 干净 clone 基线 | 历史 Phase 3C 记录 698/698 tests、80/80 security smoke；本次未重验 |
 | GitHub Actions | 配置 Windows 与 Ubuntu 矩阵；远端运行结果不在本文中静态宣称 |
 | 实盘交易 | 不支持，代码和配置均 fail closed |
 
-本地测试数比干净 clone 多 5 个，是因为本地保留了不进入 Git 历史的退役运营模块及其专用
-测试。提交后的仓库基线不包含这些内部材料。
+Phase 3C 的 698/703 项测试计数是历史验收记录。本次目录已包含后续测试及回测正确性修复，
+当前本地质量门为 782 项。未重新验证干净 clone 或远端 CI，不能把历史计数当作当前版本验收。
 
 ## 核心能力
 
@@ -40,6 +40,10 @@ production-ready 或 live-trading-ready。
 - 存储：SQLite、版本化 migration、备份校验、迁移计划绑定和故障恢复。
 - 工程质量：Ruff、Mypy strict、Pytest、安全 smoke、Windows/Ubuntu CI。
 - 研究工具：持久化画像、durability 实验和策略计算画像；不在 CI 中运行 benchmark。
+- 研究闭环：公共历史数据质量门、五阶段报告重建、候选/源码/数据冻结、一次性样本外验证，
+  并严格区分历史样本外与冻结后的前向窗口。操作流程见 [docs/research-cycle.md](docs/research-cycle.md)。
+- 独立研究快照：冻结源码目录、参数、锁定依赖和数据，支持迁移后隔离复现；旧批次保留原件并
+  标明事后归档边界。入口及限制见 [docs/research-snapshots.md](docs/research-snapshots.md)。
 
 ## 架构概览
 
@@ -165,6 +169,8 @@ uv run python -m app.cli backtest --config configs/btc_ma_backtest.yaml
 ```
 
 结果会写入配置中的 `data/results/.../<run_id>/`。`data/` 下的运行数据和报告默认不会进入 Git。
+
+通用现货回测现在使用 `ohlc_limit_v2`：收盘生成限价，下一根 K 线起撮合；价格未触及时保留挂单，成交量不足时部分成交。止损处理盘中触发和跳空，完整平仓周期写入 `closed_trades.csv`。`backtest.volume_participation` 可设置每根 K 线的成交量占比上限，默认 `1`。旧回测结果需要按新模型重跑，详细执行与盈亏口径见 [回测正确性](docs/backtest-correctness.md)。
 
 运行 VWAP 回测前，需要准备配置中声明的 `data/btc_usdt_1h_live.csv`；可以使用
 `download-data` 的 `--output`、`--instrument`、`--bar` 和 `--limit` 参数生成对应数据。
@@ -365,6 +371,7 @@ tests/           单元、集成、故障恢复和安全边界测试
 ## 进一步阅读
 
 - [架构](docs/architecture.md)
+- [回测成交与盈亏口径](docs/backtest-correctness.md)
 - [安全约束](docs/SAFETY_CONTRACT.md)
 - [Demo 验证](docs/demo-validation.md)
 - [Demo Proposal 预检](docs/demo-order-preflight.md)

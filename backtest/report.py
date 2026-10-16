@@ -6,6 +6,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from app.execution.backtest_broker import ClosedTrade
 from backtest.engine import BacktestResult
 
 TRADE_FIELDS = [
@@ -22,6 +23,7 @@ TRADE_FIELDS = [
     "slippage_cost",
     "signal_id",
     "client_order_id",
+    "exit_reason",
 ]
 EQUITY_FIELDS = [
     "run_id",
@@ -47,6 +49,11 @@ def write_backtest_report(result: BacktestResult, output_dir: Path) -> None:
         output_dir / "equity_curve.csv",
         [asdict(point) for point in result.equity_curve],
         EQUITY_FIELDS,
+    )
+    _write_csv(
+        output_dir / "closed_trades.csv",
+        [asdict(trade) for trade in result.closed_trades],
+        list(ClosedTrade.__dataclass_fields__),
     )
     with (output_dir / "backtest_summary.json").open("w", encoding="utf-8") as file:
         json.dump(result.summary, file, ensure_ascii=False, indent=2, default=str)
