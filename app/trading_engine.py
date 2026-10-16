@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import ROUND_DOWN, Decimal
 from typing import Protocol
@@ -25,8 +25,8 @@ from app.execution.base import Broker
 from app.execution.order_manager import new_client_order_id
 from app.position_sizing.base import PositionSizeDecision, PositionSizer
 from app.risk.risk_manager import RiskContext, RiskManager
-from app.runtime.clock import Clock
-from app.strategies.base import Strategy
+from app.runtime.clock import Clock, ReplayClock
+from app.strategies.base import StatefulStrategy, Strategy, strategy_identity
 
 
 class PortfolioSource(Protocol):
@@ -104,10 +104,27 @@ class TradingEngine:
         self.submitted_order_count = 0
 
     def start(self) -> None:
+        if isinstance(self.strategy, StatefulStrategy) and self.mode is not TradingMode.BACKTEST:
+            raise ValueError(
+                "stateful research strategies require the explicit read-only Shadow adapter"
+            )
         self.strategy.on_start(self._context(None))
 
     def stop(self) -> None:
         self.strategy.on_stop(self._context(None))
+
+    def warmup(self, candles: list[Candle]) -> None:
+        if not isinstance(self.strategy, StatefulStrategy):
+            raise ValueError("strategy does not implement explicit warmup")
+        from app.market.historical_data import BAR_INTERVALS
+
+        if not isinstance(self.clock, ReplayClock):
+            raise ValueError("explicit warmup requires a replay clock")
+        for candle in candles:
+            self.clock.advance_to(candle.timestamp + BAR_INTERVALS[self.bar.lower()])
+            context = replace(self._context(MarketSnapshot(candle, candle.close)), is_warmup=True)
+            if self.strategy.on_bar(context, candle):
+                raise ValueError("warmup strategy emitted signals")
 
     def generate_signals(self, candle: Candle) -> list[Signal]:
         if not candle.confirmed:
@@ -139,6 +156,7 @@ class TradingEngine:
             "SignalGenerated",
             signal.timestamp,
             {
+                "strategy_identity": strategy_identity(self.strategy),
                 "signal_id": signal.signal_id,
                 "action": signal.action.value,
                 "reason": signal.reason,
@@ -335,6 +353,8 @@ class TradingEngine:
         payload: dict[str, object],
         idempotency_key: str,
     ) -> None:
+        if isinstance(self.strategy, StatefulStrategy):
+            payload = {"strategy_identity": strategy_identity(self.strategy), **payload}
         self.event_bus.publish(
             DomainEvent(
                 run_id=self.run_id,

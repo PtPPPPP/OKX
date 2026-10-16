@@ -12,6 +12,7 @@ from app.domain.position import Portfolio
 from app.domain.signal import SignalAction
 from app.runtime.clock import BacktestClock
 from app.strategies.registry import create_strategy, strategy_descriptions
+from app.strategies.v3_parameters import V3_PARAMETER_MODELS
 from tests.conftest import make_candles
 
 
@@ -33,7 +34,12 @@ def context(instrument: Instrument, strategy_name: str, price: Decimal) -> Strat
 
 def test_registry_exposes_two_replaceable_strategies() -> None:
     names = {item["name"] for item in strategy_descriptions()}
-    assert names == {"moving_average_cross", "buy_and_hold", "vwap_mean_reversion"}
+    assert names == {
+        "moving_average_cross",
+        "buy_and_hold",
+        "vwap_mean_reversion",
+        *V3_PARAMETER_MODELS,
+    }
 
 
 def test_buy_and_hold_buys_once(btc_instrument: Instrument) -> None:

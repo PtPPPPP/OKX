@@ -271,6 +271,8 @@ def build_run_start_manifest(
     run_started_at: datetime,
 ) -> dict[str, Any]:
     version = code_version()
+    from app.strategies.registry import configuration_identity
+
     return {
         "run_id": run_id,
         "mode": config.mode.value,
@@ -283,6 +285,9 @@ def build_run_start_manifest(
         "instrument_snapshot": instrument_snapshot.to_dict(),
         "config_snapshot": config.model_dump(mode="json"),
         "strategy_name": config.strategy.name,
+        "strategy_identity": configuration_identity(
+            config.strategy.name, config.strategy.parameters, config.strategy.implementation_version
+        ),
         "strategy_parameters": config.strategy.parameters,
         "instrument_id": config.market.instrument_id,
         "bar": config.market.bar,

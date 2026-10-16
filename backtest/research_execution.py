@@ -8,20 +8,20 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
+
 from app.config.run_config import RunConfig
-from app.domain.context import StrategyContext
 from app.domain.events import EventBus
-from app.domain.market import Candle, InstrumentType
-from app.domain.order import Order, OrderSide
+from app.domain.market import Candle
 from app.domain.position import Portfolio
-from app.domain.signal import Signal, SignalAction
 from app.execution.backtest_broker import BacktestBroker
 from app.position_sizing.fixed_notional import FixedNotionalPositionSizer
 from app.reproducibility import InstrumentSnapshotStore, canonical_hash
 from app.risk.risk_manager import default_risk_manager
 from app.runtime.clock import BacktestClock
-from app.strategies.base import Strategy
+from app.strategies.base import StatefulStrategy, Strategy
 from app.strategies.buy_and_hold import BuyAndHoldParameters, BuyAndHoldStrategy
+from app.strategies.registry import create_strategy
 from backtest.engine import BacktestEngine, BacktestResult
 from backtest.report import write_backtest_report
 from backtest.research_governance import (
@@ -34,76 +34,15 @@ from backtest.research_governance import (
     verify_report,
     write_json_once,
 )
-from backtest.strategy_v3_candidates import V3Variant, generate_v3_signals, load_v3_specs
-from backtest.strategy_v3_features import aggregate_completed
+from backtest.strategy_v3_candidates import V3Variant, load_v3_specs
 from scripts.run_strategy_v2_research import _require_artifact
 
 
-class V3ExecutionStrategy:
-    """Causal entry flags plus a predeclared holding limit; no exchange dependency."""
-
-    description = "Frozen V3 entry episode, fixed holding limit"
-    supported_market_types = frozenset({InstrumentType.SPOT})
-    required_history = 300
-
-    def __init__(self, candles: list[Candle], variant: V3Variant, *, warmup_count: int = 0) -> None:
-        self.name = variant.candidate_id
-        flags = generate_v3_signals(
-            candles, aggregate_completed(candles, hours=4), variant
-        ).candidate
-        self._flags = {bar.timestamp: flag for bar, flag in zip(candles, flags, strict=True)}
-        self._initial_previous = flags[warmup_count - 1] if warmup_count else False
-        self._previous = self._initial_previous
-        self._active_order = False
-        self._entered_at: datetime | None = None
-
-    def on_start(self, context: StrategyContext) -> None:
-        self._previous = self._initial_previous
-        self._active_order = False
-        self._entered_at = None
-
-    def on_stop(self, context: StrategyContext) -> None:
-        pass
-
-    def on_order_update(self, context: StrategyContext, order: Order) -> None:
-        self._active_order = order.is_open
-        if (
-            order.request.side is OrderSide.BUY
-            and order.filled_quantity > 0
-            and self._entered_at is None
-        ):
-            self._entered_at = order.updated_at or context.now
-        if context.portfolio_snapshot.position(context.instrument.instrument_id) <= 0:
-            self._entered_at = None
-
-    def on_bar(self, context: StrategyContext, bar: Candle) -> list[Signal]:
-        flag = self._flags[bar.timestamp]
-        entry = flag and not self._previous
-        self._previous = flag
-        action, reason = SignalAction.HOLD, "no_frozen_episode"
-        position = context.portfolio_snapshot.position(context.instrument.instrument_id)
-        if not self._active_order:
-            if (
-                position > 0
-                and self._entered_at is not None
-                and context.now - self._entered_at
-                >= timedelta(hours=int(EXECUTION_POLICY["maximum_hold_hours"]))
-            ):
-                action, reason = SignalAction.CLOSE, "time_exit"
-            elif position <= 0 and entry:
-                action, reason = SignalAction.BUY, "frozen_episode"
-        return [
-            Signal(
-                canonical_hash([self.name, bar.timestamp.isoformat(), action.value])[:32],
-                self.name,
-                context.instrument.instrument_id,
-                action,
-                context.now,
-                reason,
-                Decimal("1") if action is not SignalAction.HOLD else Decimal("0"),
-                metadata={"candle_confirmed": True, "exit_reason": reason},
-            )
-        ]
+def create_v3_strategy(variant: V3Variant, source_root: Path = PROJECT_ROOT) -> Strategy:
+    instrument = InstrumentSnapshotStore.load(
+        source_root / "configs/snapshots/BTC-USDT.json"
+    ).instrument
+    return create_strategy(variant.candidate_id, variant.parameters, instrument)
 
 
 class _History:
@@ -130,13 +69,26 @@ def evaluate(
     protective: bool = True,
     source_root: Path = PROJECT_ROOT,
     signal_trace: list[dict[str, Any]] | None = None,
+    warmup_candles: list[Candle] | None = None,
 ) -> BacktestResult:
     policy = EXECUTION_POLICY
+    model = getattr(strategy, "parameters", None)
+    parameters = (
+        strategy.parameter_values
+        if isinstance(strategy, StatefulStrategy)
+        else model.model_dump(mode="json")
+        if isinstance(model, BaseModel)
+        else {}
+    )
     config = RunConfig.model_validate(
         {
             "mode": "backtest",
             "market": {"instrument_id": "BTC-USDT", "bar": "1h"},
-            "strategy": {"name": "buy_and_hold", "parameters": {}},
+            "strategy": {
+                "name": strategy.name,
+                "parameters": parameters,
+                "implementation_version": getattr(strategy, "implementation_version", None),
+            },
             "position_sizing": {"parameters": {"order_notional": policy["order_notional"]}},
             "backtest": {
                 "initial_capital": policy["initial_capital"],
@@ -194,8 +146,9 @@ def evaluate(
         position_sizer=FixedNotionalPositionSizer(Decimal(str(policy["order_notional"]))),
         risk_manager=risk,
         broker=broker,
-        clock=BacktestClock(candles[0].timestamp),
+        clock=BacktestClock((warmup_candles or candles)[0].timestamp),
         event_bus=bus,
+        warmup_candles=warmup_candles,
     ).run()
     if signal_trace is not None:
         signal_trace.extend(
@@ -272,7 +225,7 @@ def historical_execution(
         for multiplier in EXECUTION_POLICY["cost_multipliers"]:
             result = evaluate(
                 candles,
-                V3ExecutionStrategy(candles, variant),
+                create_v3_strategy(variant, source_root),
                 csv_path=cache / "normalized/candles.csv",
                 multiplier=multiplier,
                 source_root=source_root,
@@ -401,7 +354,6 @@ def execute_frozen_validation(
         # Forward context is known only through this window's own observations.
         # Do not pretend stale August bars are continuous with an October start.
         warmup = []
-    combined = [*warmup, *candles]
     variants = {
         v.candidate_id: v
         for v in load_v3_specs(source_root / "configs/research/strategy_v3_candidate_specs.json")
@@ -417,11 +369,12 @@ def execute_frozen_validation(
             trace: list[dict[str, Any]] | None = [] if signal_traces is not None else None
             result = evaluate(
                 candles,
-                V3ExecutionStrategy(combined, variant, warmup_count=len(warmup)),
+                create_v3_strategy(variant, source_root),
                 csv_path=cache / "normalized/candles.csv",
                 multiplier=multiplier,
                 source_root=source_root,
                 signal_trace=trace,
+                warmup_candles=warmup,
             )
             if signal_traces is not None:
                 signal_traces[f"{variant.candidate_id}/cost_{multiplier}x"] = trace

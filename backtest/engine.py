@@ -11,7 +11,7 @@ from typing import Any, Protocol
 from app.config.run_config import RunConfig
 from app.config.settings import TradingMode
 from app.domain.events import EventBus
-from app.domain.market import Candle, Instrument
+from app.domain.market import Candle, Instrument, validate_confirmed_bar
 from app.domain.order import Order, OrderSide, OrderType
 from app.domain.position import Portfolio
 from app.domain.signal import Signal, SignalAction
@@ -22,7 +22,12 @@ from app.market.providers import MarketDataProvider
 from app.position_sizing.base import PositionSizer
 from app.risk.risk_manager import RiskManager
 from app.runtime.clock import BacktestClock
-from app.strategies.base import ProtectiveExitProvider, Strategy
+from app.strategies.base import (
+    ProtectiveExitProvider,
+    StatefulStrategy,
+    Strategy,
+    strategy_identity,
+)
 from app.trading_engine import (
     EngineRepository,
     EngineRiskState,
@@ -94,11 +99,21 @@ class BacktestEngine:
         clock: BacktestClock,
         event_bus: EventBus,
         repository: EngineRepository | None = None,
+        warmup_candles: list[Candle] | None = None,
     ) -> None:
         self.run_id, self.config, self.instrument = run_id, config, instrument
         self.provider, self.strategy, self.position_sizer = provider, strategy, position_sizer
         self.risk_manager, self.broker, self.clock = risk_manager, broker, clock
         self.event_bus = event_bus
+        self.warmup_candles = warmup_candles or []
+        if isinstance(strategy, StatefulStrategy) and (
+            config.strategy.name != strategy.name
+            or config.strategy.parameters != strategy.parameter_values
+            or config.strategy.implementation_version != strategy.implementation_version
+        ):
+            raise ValueError(
+                "configured strategy identity/parameters differ from the runtime object"
+            )
         self._peak_equity = config.backtest.initial_capital
         self._day_start_equity = config.backtest.initial_capital
         self._recent_order_times: list[datetime] = []
@@ -131,16 +146,27 @@ class BacktestEngine:
             raise ValueError("回测没有可用 K 线")
         if any(not candle.confirmed for candle in candles):
             raise ValueError("回测数据只能包含已确认收盘 K 线")
+        if isinstance(self.strategy, StatefulStrategy):
+            previous: Candle | None = None
+            for candle in [*self.warmup_candles, *candles]:
+                validate_confirmed_bar(
+                    candle, previous, interval=BAR_INTERVALS[self.config.market.bar.lower()]
+                )
+                previous = candle
         candles = normalize_candles(candles, bar=self.config.market.bar)
         interval = BAR_INTERVALS[self.config.market.bar.lower()]
         started_at = candles[0].timestamp
-        self.clock.advance_to(started_at)
+        self.clock.advance_to(
+            self.warmup_candles[0].timestamp if self.warmup_candles else started_at
+        )
         pending_signals: list[tuple[Signal, Decimal]] = []
         equity_curve: list[EquityPoint] = []
         previous_equity = self.config.backtest.initial_capital
         previous_day: date | None = None
         self.trading_engine.start()
         try:
+            if self.warmup_candles:
+                self.trading_engine.warmup(self.warmup_candles)
             for candle in candles:
                 self.clock.advance_to(candle.timestamp)
                 if candle.timestamp.date() != previous_day:
@@ -219,6 +245,7 @@ class BacktestEngine:
             unrealized_pnl=self.broker.unrealized_pnl(candles[-1].close),
             pending_at_end=pending_at_end,
         )
+        summary["strategy_identity"] = strategy_identity(self.strategy)
         return BacktestResult(
             run_id=self.run_id,
             mode=TradingMode.BACKTEST.value,

@@ -27,11 +27,11 @@ from app.services.continuous_shadow_repository import (
 )
 from app.storage.database import Database
 from app.storage.migrations import MIGRATIONS, MigrationManager
-from app.strategies.registry import create_strategy
+from app.strategies.registry import STRATEGY_REGISTRY, create_strategy
 from app.strategies.vwap_shadow import VWAPShadowStrategy
 from app.testing.fault_injection import FaultInjector
 
-_STRATEGY_VERSION = "vwap_shadow_v1"
+_STRATEGY_VERSION = STRATEGY_REGISTRY["vwap_shadow"].implementation_version
 _INSTRUMENT = "BTC-USDT"
 _BAR = "1h"
 _RECONCILIATION_LIMIT = 300
@@ -585,6 +585,7 @@ class ContinuousVWAPShadowRunner:
             portfolio,
             MarketSnapshot(candle, candle.close) if candle is not None else None,
             clock,
+            read_only=True,
         )
 
     def _validate(self, settings: ContinuousVWAPShadowConfiguration) -> None:

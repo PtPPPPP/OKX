@@ -12,6 +12,7 @@ from typing import Any
 from app.domain.market import Candle
 from app.market.historical_data import normalize_candles
 from app.reproducibility import canonical_hash
+from app.strategies.v3 import V3Strategy
 from backtest.strategy_v3_candidates import load_v3_specs
 from backtest.vwap_signal_edge_data import load_normalized_candles
 from scripts.research_snapshot import environment, source_files
@@ -67,7 +68,7 @@ EXECUTION_POLICY: dict[str, Any] = {
     "volume_participation": "1",
     "stop_loss_pct": "1",
     "take_profit_pct": "2",
-    "maximum_hold_hours": 24,
+    "maximum_hold_hours": V3Strategy.maximum_hold_hours,
     "cost_multipliers": [1, 2],
     "minimum_closed_trades": 100,
     "minimum_positive_year_fraction": "0.6",

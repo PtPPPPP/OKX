@@ -26,6 +26,8 @@ class StrategyContext:
     portfolio_snapshot: PortfolioSnapshot
     market_snapshot: MarketSnapshot | None
     clock: Clock
+    is_warmup: bool = False
+    read_only: bool = False
 
     @property
     def now(self) -> datetime:

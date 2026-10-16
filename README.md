@@ -44,6 +44,8 @@ Phase 3C 的 698/703 项测试计数是历史验收记录。本次目录已包�
   并严格区分历史样本外与冻结后的前向窗口。操作流程见 [docs/research-cycle.md](docs/research-cycle.md)。
 - 独立研究快照：冻结源码目录、参数、锁定依赖和数据，支持迁移后隔离复现；旧批次保留原件并
   标明事后归档边界。入口及限制见 [docs/research-snapshots.md](docs/research-snapshots.md)。
+- V3 策略契约：研究、回测和显式只读逐根输入共用版本化策略、参数校验、预热与状态恢复。
+  本开发副本与旧冻结隔离，支持范围见 [docs/strategy-contract.md](docs/strategy-contract.md)。
 
 ## 架构概览
 

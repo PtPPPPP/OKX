@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 from pydantic import BaseModel
 
+from app.config.settings import TradingMode
 from app.domain.market import Instrument, InstrumentType
 from app.strategies.base import Strategy
 from app.strategies.buy_and_hold import (
@@ -16,6 +18,8 @@ from app.strategies.moving_average import (
     MovingAverageCrossParameters,
     MovingAverageCrossStrategy,
 )
+from app.strategies.v3 import V3Strategy
+from app.strategies.v3_parameters import V3_PARAMETER_MODELS, V3Parameters
 from app.strategies.vwap_mean_reversion import (
     VWAPMeanReversionParameters,
     VWAPMeanReversionStrategy,
@@ -34,6 +38,8 @@ class StrategyRegistration:
     required_history: int | str
     supported_market_types: frozenset[InstrumentType]
     shadow_only: bool = False
+    implementation_version: str = "legacy_unversioned"
+    research_only: bool = False
 
 
 def _moving_average_factory(parameters: BaseModel) -> Strategy:
@@ -89,12 +95,68 @@ STRATEGY_REGISTRY: dict[str, StrategyRegistration] = {
         required_history="vwap_window",
         supported_market_types=VWAPShadowStrategy.supported_market_types,
         shadow_only=True,
+        implementation_version="vwap_shadow_v1",
     ),
 }
 
 
-def create_strategy(name: str, parameters: dict[str, Any], instrument: Instrument) -> Strategy:
+def _v3_factory(name: str, parameters: BaseModel) -> Strategy:
+    if not isinstance(parameters, V3Parameters):
+        raise TypeError("V3 parameter model mismatch")
+    return V3Strategy(name, parameters)
+
+
+for _name, _model in V3_PARAMETER_MODELS.items():
+    STRATEGY_REGISTRY[_name] = StrategyRegistration(
+        parameter_model=_model,
+        factory=partial(_v3_factory, _name),
+        description=V3Strategy.description,
+        required_history="parameter-bound 1H window and completed 4H bars",
+        supported_market_types=V3Strategy.supported_market_types,
+        implementation_version=V3Strategy.implementation_version,
+        research_only=True,
+    )
+
+
+def validate_strategy_mode(name: str, mode: TradingMode) -> None:
+    if _registration(name).research_only and mode is not TradingMode.BACKTEST:
+        raise ValueError(
+            "research strategy requires backtest mode; use the explicit read-only Shadow adapter"
+        )
+
+
+def validate_strategy_version(name: str, version: str | None) -> None:
     registration = _registration(name)
+    if version is None and registration.research_only:
+        raise ValueError("V3 configuration requires an explicit implementation_version")
+    if version is not None and version != registration.implementation_version:
+        raise ValueError("configured strategy implementation_version is unavailable")
+
+
+def configuration_identity(
+    name: str, parameters: dict[str, Any], version: str | None
+) -> dict[str, Any]:
+    validate_strategy_version(name, version)
+    registration = _registration(name)
+    validated = registration.parameter_model.model_validate(parameters)
+    return {
+        "strategy_id": name,
+        "implementation_version": registration.implementation_version,
+        "parameters": validated.model_dump(mode="json"),
+        "state_contract_version": 1 if registration.research_only else None,
+    }
+
+
+def create_strategy(
+    name: str,
+    parameters: dict[str, Any],
+    instrument: Instrument,
+    *,
+    implementation_version: str | None = None,
+) -> Strategy:
+    registration = _registration(name)
+    if implementation_version is not None:
+        validate_strategy_version(name, implementation_version)
     validated = registration.parameter_model.model_validate(parameters)
     strategy = registration.factory(validated)
     if instrument.instrument_type not in registration.supported_market_types:
@@ -120,6 +182,8 @@ def strategy_descriptions() -> list[dict[str, Any]]:
                 "supported_market_types": sorted(
                     item.value for item in registration.supported_market_types
                 ),
+                "implementation_version": registration.implementation_version,
+                "research_only": registration.research_only,
             }
         )
     return descriptions

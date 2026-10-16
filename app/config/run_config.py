@@ -39,6 +39,7 @@ class MarketConfig(StrictModel):
 
 class StrategyConfig(StrictModel):
     name: str = "moving_average_cross"
+    implementation_version: str | None = None
     acceptance_only: bool = False
     timeframe: str | None = None
     fast_window: int | None = Field(default=None, gt=0)
@@ -197,9 +198,15 @@ def load_run_config(
             _set_nested(data, tuple(key.split(".")), value)
 
     config = RunConfig.model_validate(deepcopy(data))
-    from app.strategies.registry import validate_strategy_parameters
+    from app.strategies.registry import (
+        validate_strategy_mode,
+        validate_strategy_parameters,
+        validate_strategy_version,
+    )
 
     validate_strategy_parameters(config.strategy.name, config.strategy.parameters)
+    validate_strategy_mode(config.strategy.name, config.mode)
+    validate_strategy_version(config.strategy.name, config.strategy.implementation_version)
     validate_position_sizing(config.position_sizing)
     return config
 

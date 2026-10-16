@@ -19,6 +19,10 @@ flowchart LR
 
 `TradingEngine` 负责从策略信号到 Broker 的通用链路。它只依赖领域接口和注入对象，不知道 OKX、REST、WebSocket、CLI、环境变量、BTC-USDT 或某个具体策略。
 
+V3 研究候选使用现有注册表与 `StatefulStrategy` 扩展：批量研究、回测和显式只读逐根适配器
+共享因果特征及状态更新；配置、对象、事件和报告绑定版本与参数。时间、预热、反馈、恢复及
+旧策略兼容边界见 [统一策略契约](strategy-contract.md)。执行撮合仍由各 Runner/Broker 定义。
+
 ## 三种 Runner
 
 - 回测 Runner：历史 Provider 输入已确认 K 线，收盘信号从下一根 K 线开始限价撮合，使用 `BacktestBroker`。订单可挂起或部分成交；保护退出按已知价位和 OHLC 处理，具体假设见 [回测口径](backtest-correctness.md)。

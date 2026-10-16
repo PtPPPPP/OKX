@@ -65,7 +65,12 @@ def build_backtest_session(config: RunConfig, settings: Settings) -> TradingSess
         else:
             source_provider = OKXHistoricalDataProvider(client)
         provider = RecordingMarketDataProvider(source_provider)
-        strategy = create_strategy(config.strategy.name, config.strategy.parameters, instrument)
+        strategy = create_strategy(
+            config.strategy.name,
+            config.strategy.parameters,
+            instrument,
+            implementation_version=config.strategy.implementation_version,
+        )
         order_notional = Decimal(str(config.position_sizing.parameters["order_notional"]))
         position_sizer = FixedNotionalPositionSizer(order_notional)
         risk_manager = default_risk_manager(
@@ -242,7 +247,12 @@ def build_demo_evaluation_session(config: RunConfig, settings: Settings) -> Trad
         daily_pnl, drawdown = repository.daily_risk_metrics(
             instrument.instrument_id, sync.captured_at, current_equity
         )
-        strategy = create_strategy(config.strategy.name, config.strategy.parameters, instrument)
+        strategy = create_strategy(
+            config.strategy.name,
+            config.strategy.parameters,
+            instrument,
+            implementation_version=config.strategy.implementation_version,
+        )
         position_sizer = FixedNotionalPositionSizer(
             Decimal(str(config.position_sizing.parameters["order_notional"]))
         )
@@ -322,7 +332,12 @@ def build_public_observe_session(
         database.initialize()
         repository = TradingRepository(database)
         run_id = uuid4().hex
-        strategy = create_strategy(config.strategy.name, config.strategy.parameters, instrument)
+        strategy = create_strategy(
+            config.strategy.name,
+            config.strategy.parameters,
+            instrument,
+            implementation_version=config.strategy.implementation_version,
+        )
         clock = BacktestClock(datetime.now(UTC))
         portfolio_source = StaticPortfolioSource(
             PortfolioSnapshot(

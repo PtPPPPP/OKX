@@ -10,7 +10,7 @@ import pytest
 
 from app.config.run_config import RunConfig
 from app.reproducibility import canonical_hash
-from backtest.research_execution import V3ExecutionStrategy, independent_validation
+from backtest.research_execution import independent_validation
 from backtest.research_governance import (
     PROJECT_ROOT,
     file_hash,
@@ -20,7 +20,8 @@ from backtest.research_governance import (
     validation_dataset,
     verify_freeze,
 )
-from backtest.strategy_v3_candidates import load_v3_specs
+from backtest.strategy_v3_candidates import generate_v3_signals, load_v3_specs
+from backtest.strategy_v3_features import aggregate_completed
 from backtest.vwap_signal_edge_data import HistoricalCandleCache, _manifest, _parse_raw
 from scripts.research_snapshot import source_files
 
@@ -346,8 +347,6 @@ def test_execution_entry_flags_cannot_change_when_future_bars_change(
     for variant in load_v3_specs(
         tree["root"] / "configs/research/strategy_v3_candidate_specs.json"
     ):
-        original = V3ExecutionStrategy(bars, variant)
-        changed = V3ExecutionStrategy(altered, variant)
-        assert all(
-            original._flags[bar.timestamp] == changed._flags[bar.timestamp] for bar in bars[:80]
-        )
+        original = generate_v3_signals(bars, aggregate_completed(bars, hours=4), variant)
+        changed = generate_v3_signals(altered, aggregate_completed(altered, hours=4), variant)
+        assert original.candidate[:80] == changed.candidate[:80]

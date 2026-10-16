@@ -19,7 +19,13 @@ from typing import Any
 FORMAT_VERSION = 1
 CODE_DIRECTORIES = ("app", "backtest", "scripts")
 RESOURCE_DIRECTORIES = ("configs/research", "configs/snapshots")
-ROOT_RESOURCES = ("pyproject.toml", "uv.lock", "README.md", "docs/research-snapshots.md")
+ROOT_RESOURCES = (
+    "pyproject.toml",
+    "uv.lock",
+    "README.md",
+    "docs/research-snapshots.md",
+    "docs/strategy-contract.md",
+)
 DATA_FILES = ("data_manifest.json", "normalized/candles.csv")
 PURPOSES = ("historical_oos", "prospective")
 
