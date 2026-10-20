@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -33,14 +35,30 @@ from app.runners.demo import (
     StaticPortfolioSource,
 )
 from app.runtime.clock import BacktestClock, SystemClock
+from app.services.demo_proposal_application import DemoProposalApplication
+from app.services.demo_session import DemoTradingSession
 from app.services.private_state_coordinator import PrivateStateCoordinator
 from app.services.reconciliation import ReconciliationStatus
 from app.session import SessionDescriptor, TradingSession
+from app.storage.audit import AuditRepository
 from app.storage.database import Database
 from app.storage.repositories import TradingRepository
 from app.strategies.registry import create_strategy
 from app.trading_engine import ProtectiveExitPolicy, TradingEngine
 from backtest.engine import BacktestEngine
+
+
+@contextmanager
+def open_demo_proposal_application(
+    config: RunConfig, settings: Settings, repository: TradingRepository, client: OkxClient
+) -> Iterator[DemoProposalApplication]:
+    """Take ownership of client, close session then client on every exit path."""
+    with ExitStack() as resources:
+        resources.callback(client.close)
+        session = DemoTradingSession(config, settings, client, repository)
+        resources.callback(session.close)
+        session.start()
+        yield DemoProposalApplication(repository, client, session)
 
 
 def build_backtest_session(config: RunConfig, settings: Settings) -> TradingSession:
@@ -266,7 +284,10 @@ def build_demo_evaluation_session(config: RunConfig, settings: Settings) -> Trad
         )
         clock = BacktestClock(confirmed[0].timestamp)
         portfolio_source = StaticPortfolioSource(sync.portfolio)
-        event_bus = EventBus(repository)
+        event_bus = EventBus(
+            AuditRepository(database, event_mode=config.mode.value, event_bar=config.market.bar),
+            retention_limit=256,
+        )
         engine = TradingEngine(
             run_id=run_id,
             mode=TradingMode.DEMO,
@@ -349,7 +370,10 @@ def build_public_observe_session(
                 average_entry_prices={},
             )
         )
-        event_bus = EventBus(repository)
+        event_bus = EventBus(
+            AuditRepository(database, event_mode=config.mode.value, event_bar=config.market.bar),
+            retention_limit=256,
+        )
         websocket_provider = OKXPublicWebSocketProvider(
             gap_provider=OKXHistoricalDataProvider(client),
             stale_after_seconds=config.risk.stale_after_seconds,

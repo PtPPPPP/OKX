@@ -121,6 +121,7 @@ class OKXPublicWebSocketProvider:
         # for local-proxy route changes during a 24h soak, while remaining a
         # bounded fail-closed limit rather than an infinite retry loop.
         max_reconnect_attempts: int = 20,
+        max_total_reconnects: int = 100,
         base_reconnect_delay_seconds: float = 1,
         shutdown_timeout_seconds: float = 5,
     ) -> None:
@@ -133,6 +134,9 @@ class OKXPublicWebSocketProvider:
         self.pong_timeout_seconds = pong_timeout_seconds
         self.stale_after = timedelta(seconds=stale_after_seconds)
         self.max_reconnect_attempts = max_reconnect_attempts
+        if max_total_reconnects < 0:
+            raise ValueError("total reconnect budget cannot be negative")
+        self.max_total_reconnects = max_total_reconnects
         self.base_reconnect_delay_seconds = base_reconnect_delay_seconds
         if shutdown_timeout_seconds < 0:
             raise ValueError("WebSocket shutdown timeout cannot be negative")
@@ -140,6 +144,7 @@ class OKXPublicWebSocketProvider:
         self.state = ConnectionState.DISCONNECTED
         self.last_message_at: datetime | None = None
         self.last_candle_at: datetime | None = None
+        self.last_market_received_at: datetime | None = None
         self.reconnect_count = 0
         self.connection_count = 0
         self.subscription_count = 0
@@ -190,6 +195,7 @@ class OKXPublicWebSocketProvider:
                         if message is None:
                             continue
                         for candle in self._parse_candles(message, bar):
+                            self.last_market_received_at = datetime.now(UTC)
                             self.live_event_count += 1
                             self.unconfirmed_event_count += int(not candle.confirmed)
                             if not candle.confirmed:
@@ -222,7 +228,10 @@ class OKXPublicWebSocketProvider:
                     break
                 attempt += 1
                 self.reconnect_count += 1
-                if attempt > self.max_reconnect_attempts:
+                if (
+                    attempt > self.max_reconnect_attempts
+                    or self.reconnect_count > self.max_total_reconnects
+                ):
                     self.state = ConnectionState.BLOCKED
                     raise MarketDataError(
                         f"WebSocket 连续重连失败: {type(exc).__name__}: {exc}"
@@ -278,6 +287,7 @@ class OKXPublicWebSocketProvider:
                         if message is None:
                             continue
                         for candle in self._parse_candles(message, bar):
+                            self.last_market_received_at = datetime.now(UTC)
                             self.live_event_count += 1
                             self.unconfirmed_event_count += int(not candle.confirmed)
                             if candle.confirmed and self._is_stale(candle, interval):
@@ -301,7 +311,10 @@ class OKXPublicWebSocketProvider:
                         break
                 attempt += 1
                 self.reconnect_count += 1
-                if attempt > self.max_reconnect_attempts:
+                if (
+                    attempt > self.max_reconnect_attempts
+                    or self.reconnect_count > self.max_total_reconnects
+                ):
                     self.state = ConnectionState.BLOCKED
                     raise MarketDataError(
                         f"WebSocket reconnect limit exceeded: {type(exc).__name__}: {exc}"

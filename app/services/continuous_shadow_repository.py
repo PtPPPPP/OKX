@@ -81,7 +81,7 @@ class ContinuousRunLock:
                 "SELECT run_id,released_at,lease_expires_at FROM continuous_run_locks WHERE lock_name=?",
                 (self.lock_name,),
             ).fetchone()
-            if row and row[0] != run_id and row[1] is None:
+            if row and row[1] is None:
                 if datetime.fromisoformat(str(row[2])) > now:
                     raise RuntimeError("continuous demo lease lock is held")
                 raise RuntimeError("continuous demo lease expired; recovery required")
@@ -544,7 +544,8 @@ class ContinuousShadowRepository:
                 """SELECT run.run_id,run.strategy_name,run.instrument_id,run.timeframe,
                           run.configuration_hash,run.status,run.processed_candle_count,
                           run.generated_signal_count,run.shadow_proposal_count,
-                          runtime.last_candle_open_time,runtime.state_json
+                          runtime.last_candle_open_time,runtime.state_json,runtime.state_hash,
+                          runtime.strategy_version
                    FROM continuous_demo_runs AS run
                    JOIN strategy_runtime_states AS runtime
                      ON runtime.run_id=run.run_id
@@ -552,6 +553,38 @@ class ContinuousShadowRepository:
                      AND runtime.strategy_name='vwap_shadow'""",
                 (run_id,),
             ).fetchone()
+            if row is not None:
+                if c.execute(
+                    "SELECT 1 FROM orders WHERE run_id=? UNION ALL SELECT 1 FROM fills WHERE run_id=? LIMIT 1",
+                    (run_id, run_id),
+                ).fetchone():
+                    raise ValueError(
+                        "pure Shadow checkpoint cannot resume with order or fill activity"
+                    )
+                expected_hash = hashlib.sha256(str(row["state_json"]).encode()).hexdigest()
+                if expected_hash != str(row["state_hash"]):
+                    raise ValueError("persisted VWAP Shadow checkpoint hash does not match")
+                from app.strategies.registry import STRATEGY_REGISTRY
+
+                if (
+                    str(row["strategy_version"])
+                    != STRATEGY_REGISTRY["vwap_shadow"].implementation_version
+                ):
+                    raise ValueError("persisted VWAP Shadow strategy version does not match")
+                for table, version_column in (
+                    ("processed_candles", "strategy_version"),
+                    ("strategy_signal_events", "strategy_version"),
+                ):
+                    records = c.execute(
+                        f"SELECT COUNT(*),MAX(candle_open_time) FROM {table} WHERE run_id=? AND {version_column}=?",
+                        (run_id, row["strategy_version"]),
+                    ).fetchone()
+                    if int(records[0]) != int(row["processed_candle_count"]) or str(
+                        records[1]
+                    ) != str(row["last_candle_open_time"]):
+                        raise ValueError(
+                            "persisted VWAP Shadow checkpoint business records do not match"
+                        )
         if row is None or row["last_candle_open_time"] is None:
             return None
         try:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -23,6 +23,7 @@ from app.services.shadow_replay import (
     ShadowReplayConfiguration,
     _single_signal,
 )
+from app.services.shadow_smoke_recovery import ShadowSmokeRecoveryService
 from app.storage.database import Database
 from app.strategies.registry import create_strategy
 from tests.test_shadow_replay_convergence import (
@@ -98,6 +99,12 @@ def _resume_lost_tail(database: Database, environment: _ReplayEnvironment, run_i
     )
     evaluations = buys = proposals = 0
     lock = ContinuousRunLock(database)
+    # This is an isolated database-copy fixture. Explicitly simulate an expired
+    # lease and absent original owner; never overwrite a live same-run lease.
+    recovered = ShadowSmokeRecoveryService(
+        database, now=datetime.now(UTC) + timedelta(hours=1), process_exists=lambda _: False
+    ).recover(run_id, "local_fixture_owner_absent")
+    assert recovered.recovered
     lock.acquire(run_id)
     try:
         with repository.replay_session() as session:

@@ -53,6 +53,28 @@ class ClosingSocket(FakeSocket):
         return self.messages.pop(0)
 
 
+def test_successful_resubscriptions_do_not_reset_total_flapping_budget() -> None:
+    sockets, factory = _closing_factory(
+        [
+            ClosingSocket([json.dumps({"event": "subscribe"})], ConnectionResetError("flap"))
+            for _ in range(3)
+        ]
+    )
+    provider = OKXPublicWebSocketProvider(
+        connection_factory=factory, base_reconnect_delay_seconds=0, max_total_reconnects=2
+    )
+
+    async def exercise() -> None:
+        async for _ in provider.stream_events("BTC-USDT", "1h"):
+            pass
+
+    with pytest.raises(MarketDataError, match="reconnect limit exceeded"):
+        asyncio.run(exercise())
+    assert provider.connection_count == provider.reconnect_count == 3
+    assert all(socket.closed for socket in sockets)
+    assert provider.state is ConnectionState.BLOCKED
+
+
 def _closing_factory(
     sockets: list[FakeSocket],
 ) -> tuple[list[FakeSocket], object]:

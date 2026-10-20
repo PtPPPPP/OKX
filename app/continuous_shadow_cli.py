@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from collections.abc import AsyncIterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -20,11 +21,32 @@ from app.market.websocket import (
     PublicWebSocketEventType,
 )
 from app.reproducibility import InstrumentSnapshotStore
+from app.services.runtime_observation import read_runtime_status
 from app.services.shadow_smoke_recovery import ShadowSmokeRecoveryService
 from app.services.vwap_continuous_shadow import ContinuousVWAPShadowRunner
 from app.storage.database import Database
 
 app = typer.Typer(help="READ-ONLY PUBLIC MARKET SHADOW. NO ORDER EXECUTION. NO PRIVATE API.")
+
+
+@app.command("runtime-status")
+def runtime_status(
+    database_path: Annotated[Path, typer.Option("--database")],
+    run_id: Annotated[str, typer.Option("--run-id")],
+) -> None:
+    """Read local runtime evidence without credentials, network, writes or migrations."""
+    try:
+        typer.echo(
+            json.dumps(read_runtime_status(database_path, run_id), ensure_ascii=False, default=str)
+        )
+    except (sqlite3.Error, ValueError, OSError, TypeError, KeyError) as exc:
+        typer.echo(
+            json.dumps(
+                {"health": "unknown", "error": str(exc), "trading_permission": False},
+                ensure_ascii=False,
+            )
+        )
+        raise typer.Exit(2) from exc
 
 
 @dataclass(slots=True)

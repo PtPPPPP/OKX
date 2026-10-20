@@ -1,8 +1,9 @@
-# V3 统一策略契约 v1
+# V3 统一策略契约 v2
 
-本次实现位于隔离开发目录 `C:/program1/coding/OKX-p1-strategy-contract`。
+当前开发入口是 Git 副本 `C:/program1/coding/OKX-github-upload-20261016`。
+此前 `v3_step_v1` 及其验收记录保留在 `C:/program1/coding/OKX-p1-strategy-contract`。
 原 `OKX` 目录仍被旧冻结的部分源码哈希绑定，没有修改其中的源码、参数、快照、数据、报告或消费记录。
-`development-origin.json` 保存复制来源、初始源码哈希及受保护文件清单。没有复制凭证、账户数据、
+前述 v1 副本的 `development-origin.json` 保存复制来源、初始源码哈希及受保护文件清单。没有复制凭证、账户数据、
 历史研究产物或虚拟环境；验证复用原环境的 Python，不向其安装包。
 
 ## 统一范围和入口
@@ -16,7 +17,7 @@
 - `htf_volume_momentum`
 - `volume_exhaustion_reversal`
 
-实现版本统一为 `v3_step_v1`，参数来自原 `strategy_v3_candidate_specs.json`。
+当前实现版本统一为 `v3_step_v2`，参数来自原 `strategy_v3_candidate_specs.json`。
 参数模型禁止未知字段、布尔数值、无效窗口和非有限阈值；不复制一套默认参数。
 运行对象名称及参数不可通过公共属性重写；参数字典返回独立副本。
 
@@ -29,7 +30,7 @@ market:
   bar: 1h
 strategy:
   name: relative_volume_breakout
-  implementation_version: v3_step_v1
+  implementation_version: v3_step_v2
   parameters:
     breakout: 20
     volume_window: 24
@@ -60,7 +61,7 @@ strategy:
 | 反馈 | 在生成后续收盘信号前应用已知订单更新，携带同一时点的持仓快照 |
 
 输入必须按逻辑决策时间递增；时间相同时也必须保持相同的反馈/收盘事件顺序。
-不能把收盘后才获知的成交反馈回填到更早的收盘决策前。只读适配器拒绝时钟倒退，
+不能把收盘后才获知的成交反馈回填到更早的收盘决策前。核心策略和只读适配器都拒绝时钟倒退，
 不负责推测迟到反馈对历史信号的影响；需要由调用方先核对状态，再明确恢复。
 历史撮合在开盘或收盘阶段产生的反馈沿用该模型的逻辑时间，不被描述为交易所真实成交时间。
 
@@ -82,17 +83,23 @@ OHLC 限价成交模型相同。
 恢复必须创建新对象并调用 `restore_checkpoint_state(state, context, open_order_ids=...)`，
 不再调用一次 `on_start`。非空仓首次启动必须提供兼容 checkpoint。
 
-策略 checkpoint 的 `format_version=1`，包含：
+策略 checkpoint 的 `format_version=2`，包含：
 
 - ID、实现版本、规范参数、标的、1H 时间尺度和内容哈希；
 - 有界已确认行情窗口、累计数量、上一个候选门控、是否已经产生验证段信号；
 - 持仓数量、首次已知买入成交时间；
 - 全部未完成订单及最近 128 个终态反馈，保留订单 ID、方向、数量、状态和时间。
+- `last_event_at`：最后成功处理行情或订单反馈的 UTC 逻辑时间，包括迟到反馈的处理时刻。
 
+恢复时上下文时钟必须等于 `last_event_at`，外层 Shadow 的 clock 也必须一致；随后按时间顺序
+继续输入。只记录交易所 `updated_at` 不能替代处理时刻，否则迟到反馈可能使恢复后的时间倒退。
 恢复校验版本、参数、窗口连续性、最后一个门控、数量、时钟及持仓；挂单 ID 必须由调用方
 显式提供，逐项匹配 checkpoint。缺失、损坏或不兼容时拒绝，不自动升级/丢弃状态。
 订单反馈不允许数量倒退、旧时间覆盖或终态重新打开；超出终态审计尾部的未知历史反馈要求
 重新核对，不能被解释成一张新挂单。持仓不得在没有订单反馈的情况下悄悄改变。
+核心格式 1 缺少处理时刻，因此当前实现明确拒绝恢复，不推测或自动迁移；需要继续旧状态时，
+使用保留的 v1 副本或检出 `f1b8805`。旧冻结仍使用自己的源码。外层 Shadow 封装格式仍为 1，
+它所包含的策略状态版本由策略身份声明，不能用外层格式代替内层校验。
 哈希用于内容一致性，不证明来自可信第三方，也不替代真实账户对账。
 
 `ConfirmedStrategyShadow` 只包装同一注册策略和重放时钟。`replay` 是 `on_candle` 的顺序循环。
@@ -108,6 +115,9 @@ OHLC 限价成交模型相同。
    有单独回归测试，视为明确的新实现版本行为，不改写旧结果。
 3. 信号 ID 现在绑定版本、参数和标的，避免不同参数实验撞 ID；相同新版本输入的 ID 稳定。
 4. 不规则数据以前可能由批量排序/跳桶掩盖；新 V3 入口明确拒绝。
+5. v1 的核心策略直接接收反馈时缺少跨事件时钟校验，Shadow 却会拒绝同一倒退事件。
+   v2 将该规则放入核心并持久化处理时刻；仅对无效倒退序列改变接受行为。实现版本和信号 ID
+   随之变化，不把 v2 的状态或报告冒充 v1。
 
 没有改变候选参数、费用、滑点、止损/止盈、24 小时持仓政策或晋升门槛。
 有效连续行情的候选公式未发现不一致。旧快照继续运行其原代码，不更新冻结哈希来兼容新代码；
@@ -118,7 +128,7 @@ OHLC 限价成交模型相同。
 在隔离开发目录执行；该命令只读取已固定哈希的开发期 fixture，输出目录必须是新目录：
 
 ```powershell
-Set-Location C:/program1/coding/OKX-p1-strategy-contract
+Set-Location C:/program1/coding/OKX-github-upload-20261016
 $python = 'C:/program1/coding/OKX/.venv/Scripts/python.exe'
 & $python -m scripts.demo_strategy_contract --output artifacts/new_contract_demo
 ```
@@ -139,4 +149,5 @@ $python = 'C:/program1/coding/OKX/.venv/Scripts/python.exe'
 账户的原子恢复、旧 V3 适配器状态迁移或交易所执行集成。V3 的逐根状态恢复已验证，不能据此
 宣称生产持续运行、跨平台恢复或不同执行环境下的成交等价。
 
-本次真实执行的命令、覆盖范围和证据见 [P1 验收记录](strategy-contract-validation.md)。
+前次真实执行的命令和证据见 [v1 验收记录](strategy-contract-validation.md)，
+本轮补全见 [2026-10-20 记录](strategy-contract-followup-20261020.md)。

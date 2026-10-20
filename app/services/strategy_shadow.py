@@ -69,6 +69,7 @@ class ConfirmedStrategyShadow:
             content = {key: value for key, value in resume_state.items() if key != "state_hash"}
             if (
                 set(content) != {"format_version", "clock", "strategy_state"}
+                or type(content["format_version"]) is not int
                 or content["format_version"] != 1
             ):
                 raise ValueError("unsupported Shadow checkpoint format")

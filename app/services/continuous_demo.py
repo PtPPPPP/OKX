@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import deque
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from contextlib import AsyncExitStack
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
 
 from app.domain.market import Candle
+from app.market.historical_data import BAR_INTERVALS
 from app.market.websocket import OKXPublicWebSocketProvider
 from app.services.continuous_runtime_safety import (
     ContinuousTaskSupervisor,
@@ -25,7 +28,9 @@ from app.services.continuous_safety import (
 )
 from app.services.continuous_shadow_repository import ContinuousRunLock, ContinuousShadowRepository
 from app.services.demo_session import DemoTradingSession
+from app.services.runtime_observation import RuntimeObservation, RuntimeObserver, assess
 from app.storage.database import Database
+from app.strategies.registry import STRATEGY_REGISTRY
 from app.strategies.vwap_mean_reversion import _rsi, _vwap
 
 
@@ -63,16 +68,87 @@ class ContinuousDemoEngine:
         self.breaker = ContinuousDemoCircuitBreaker()
         self.breaker_executor = ContinuousDemoCircuitBreakerExecutor(database)
         self._stop = False
+        self._active_run_id: str | None = None
+        self._lease_owned = False
+        self.observer: RuntimeObserver | None = None
+        self._running = False
 
     async def run(self, configuration: ContinuousDemoConfiguration) -> ContinuousDemoRunResult:
+        if self._running:
+            raise RuntimeError("continuous demo engine is already active")
+        self._running = True
+        async with AsyncExitStack() as resources:
+            resources.callback(self._mark_stopped)
+            resources.callback(self._release_lease)
+            resources.callback(self.session.close)
+            resources.push_async_callback(self.stream.stop)
+            try:
+                result = await self._run(configuration)
+                if self.observer is not None:
+                    self.observer.state.lifecycle = result.status
+                    status = self.repository.get_status(result.run_id)
+                    self.observer.state.stop_reason = (
+                        str(status["stop_reason"]) if status and status["stop_reason"] else None
+                    )
+                    self.observer.persist()
+                return result
+            except BaseException as exc:
+                if self._lease_owned and self._active_run_id is not None:
+                    try:
+                        reason = (
+                            "cancelled"
+                            if isinstance(exc, asyncio.CancelledError)
+                            else type(exc).__name__
+                        )
+                        if self.observer is not None and self.observer.state.stop_reason:
+                            reason = self.observer.state.stop_reason
+                        self.repository.finish(
+                            self._active_run_id, "frozen", reason, touch_heartbeat=False
+                        )
+                        if self.observer is not None:
+                            self.observer.state.lifecycle = "frozen"
+                            self.observer.state.stop_reason = reason
+                            self.observer.alert("task_failed")
+                            self.observer.persist()
+                    except Exception:
+                        logging.getLogger(__name__).exception(
+                            "continuous failure persistence failed"
+                        )
+                raise
+
+    def _mark_stopped(self) -> None:
+        self._running = False
+
+    def _release_lease(self) -> None:
+        if self._lease_owned and self._active_run_id is not None:
+            self.lock.release(self._active_run_id, "run_finished")
+            self._lease_owned = False
+
+    async def _run(self, configuration: ContinuousDemoConfiguration) -> ContinuousDemoRunResult:
         if configuration.maximum_order_submissions != 0:
             raise ValueError("shadow mode requires maximum_order_submissions=0")
         run_id = uuid4().hex
         self.repository.create_run(run_id, configuration, datetime.now(UTC))
+        self._active_run_id = run_id
         self.lock.acquire(run_id)
+        self._lease_owned = True
+        version = STRATEGY_REGISTRY.get(configuration.strategy_name)
+        self.observer = RuntimeObserver(
+            self.database,
+            RuntimeObservation(
+                run_id,
+                "shadow_with_private_checks",
+                version.implementation_version if version else "unknown",
+                datetime.now(UTC).isoformat(),
+                progress_timeout_seconds=2
+                * BAR_INTERVALS[configuration.timeframe.lower()].total_seconds()
+                + 120,
+            ),
+        )
+        self.observer.persist()
         processed = signals = proposals = 0
         frozen = False
-        closes: list[Decimal] = []
+        closes: deque[Decimal] = deque(maxlen=max(configuration.warmup_candle_count, 35))
         vwap_bars: deque[Candle] = deque(maxlen=26)
         previous_relation: str | None = None
         if configuration.fault_injection is not None:
@@ -141,7 +217,6 @@ class ContinuousDemoEngine:
             await self.breaker_executor.apply(
                 run_id, self.breaker.evaluate(ContinuousRunContext(reconciliation_healthy=False))
             )
-            self.session.close()
             self.lock.release(run_id, "initial_reconciliation_failed")
             return ContinuousDemoRunResult(run_id, "frozen", 0, 0, 0)
         with self.database.connect() as c:
@@ -159,11 +234,11 @@ class ContinuousDemoEngine:
             if item.confirmed
         ]
         history.sort(key=lambda item: item.timestamp)
-        closes = [item.close for item in history[-max(configuration.warmup_candle_count, 35) :]]
+        closes.extend(item.close for item in history[-max(configuration.warmup_candle_count, 35) :])
         if len(closes) < 30:
             raise RuntimeError("shadow warmup history is insufficient")
-        fast = sum(closes[-10:], Decimal("0")) / Decimal("10")
-        slow = sum(closes[-30:], Decimal("0")) / Decimal("30")
+        fast = sum(list(closes)[-10:], Decimal("0")) / Decimal("10")
+        slow = sum(list(closes)[-30:], Decimal("0")) / Decimal("30")
         previous_relation = (
             "fast_above_slow"
             if fast > slow
@@ -185,6 +260,11 @@ class ContinuousDemoEngine:
         reconciliation_stop = asyncio.Event()
 
         async def task_failure(failed_run_id: str, task_name: str) -> None:
+            assert self.observer is not None
+            self.observer.state.lifecycle = "frozen"
+            self.observer.state.stop_reason = f"{task_name}_failed"
+            self.observer.alert("task_failed")
+            self.observer.persist()
             await self.breaker_executor.apply(
                 failed_run_id,
                 self.breaker.evaluate(
@@ -202,9 +282,49 @@ class ContinuousDemoEngine:
                     processed,
                     signals,
                     proposals,
-                    private_status="ready",
-                    public_status="ready",
+                    private_status="ready" if self.session.order_submission_ready else "unknown",
+                    public_status=str(getattr(self.stream, "state", "unknown")),
                 )
+                assert self.observer is not None
+                self.observer.state.lifecycle = "ready"
+                self.observer.state.public_connection = str(
+                    getattr(self.stream, "state", "unknown")
+                )
+                health = self.session.stream.health
+                self.observer.state.private_connection = (
+                    "connected"
+                    if health.connected
+                    and health.authenticated
+                    and health.subscriptions_ready
+                    and not health.stale
+                    else "unknown"
+                )
+                connections = getattr(self.stream, "connection_count", None)
+                self.observer.state.public_reconnects = (
+                    max(0, int(connections) - 1) if connections is not None else None
+                )
+                received = getattr(self.stream, "last_market_received_at", None)
+                if received is not None:
+                    self.observer.state.market_received_at = received.isoformat()
+                private_connections = getattr(health, "connections", None)
+                self.observer.state.private_reconnects = (
+                    max(0, int(private_connections) - 1)
+                    if private_connections is not None
+                    else None
+                )
+                self.observer.state.reconciliation = (
+                    "healthy" if self.session.order_submission_ready else "unknown"
+                )
+                self.observer.state.account_trusted = (
+                    True if self.session.order_submission_ready else None
+                )
+                self.observer.persist()
+                assessment = assess(asdict(self.observer.state), self.observer.clock.now())
+                if any(
+                    code in assessment["blocking_reasons"]
+                    for code in ("market_stale", "progress_stalled")
+                ):
+                    raise RuntimeError("continuous market or business progress stalled")
                 self.lock.renew(run_id)
 
         async def private_watch() -> None:
@@ -238,6 +358,7 @@ class ContinuousDemoEngine:
             name="task_supervisor",
         )
         deadline = asyncio.get_running_loop().time() + configuration.maximum_runtime_minutes * 60
+        candle_iterator: AsyncIterator[Candle] | None = None
         try:
             with self.database.connect() as c:
                 c.execute(
@@ -262,9 +383,27 @@ class ContinuousDemoEngine:
                 if remaining <= 0:
                     break
                 try:
-                    candle = await asyncio.wait_for(candle_iterator.__anext__(), timeout=remaining)
+                    candle_task = asyncio.ensure_future(candle_iterator.__anext__())
+                    try:
+                        done, _ = await asyncio.wait(
+                            {candle_task, reconciliation_task},
+                            timeout=remaining,
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if reconciliation_task in done:
+                            await reconciliation_task
+                            raise RuntimeError("continuous task supervisor stopped")
+                        if not done:
+                            raise TimeoutError
+                        candle = candle_task.result()
+                    finally:
+                        if not candle_task.done():
+                            candle_task.cancel()
+                        await asyncio.gather(candle_task, return_exceptions=True)
                 except (StopAsyncIteration, TimeoutError):
                     break
+                assert self.observer is not None
+                self.observer.state.market_received_at = self.observer.clock.now().isoformat()
                 if not self.repository.claim_candle(
                     run_id, configuration, candle, "moving_average_cross_v1"
                 ):
@@ -354,6 +493,11 @@ class ContinuousDemoEngine:
                         signals += 1
                         proposals += 1
                     processed += 1
+                    self.observer.state.confirmed_processed_at = (
+                        self.observer.clock.now().isoformat()
+                    )
+                    self.observer.state.checkpoint = candle.timestamp.isoformat()
+                    self.observer.persist()
                     self.repository.heartbeat(
                         run_id,
                         processed,
@@ -377,8 +521,8 @@ class ContinuousDemoEngine:
                         warmup_completed=False,
                     )
                 else:
-                    fast = sum(closes[-10:], Decimal("0")) / Decimal("10")
-                    slow = sum(closes[-30:], Decimal("0")) / Decimal("30")
+                    fast = sum(list(closes)[-10:], Decimal("0")) / Decimal("10")
+                    slow = sum(list(closes)[-30:], Decimal("0")) / Decimal("30")
                     relation = (
                         "fast_above_slow"
                         if fast > slow
@@ -436,6 +580,9 @@ class ContinuousDemoEngine:
                         proposals += 1
                     previous_relation = relation
                 processed += 1
+                self.observer.state.confirmed_processed_at = self.observer.clock.now().isoformat()
+                self.observer.state.checkpoint = candle.timestamp.isoformat()
+                self.observer.persist()
                 self.repository.heartbeat(
                     run_id,
                     processed,
@@ -462,6 +609,6 @@ class ContinuousDemoEngine:
             reconciliation_stop.set()
             reconciliation_task.cancel()
             await asyncio.gather(reconciliation_task, return_exceptions=True)
-            await self.stream.stop()
-            self.session.close()
-            self.lock.release(run_id, "run_finished")
+            close = getattr(candle_iterator, "aclose", None)
+            if callable(close):
+                await close()

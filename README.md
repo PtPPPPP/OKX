@@ -14,21 +14,25 @@ production-ready 或 live-trading-ready。
 | 项目 | 状态 |
 |---|---|
 | 当前版本 | `0.3.0` |
-| Git 基线 | 历史提交记录见 Phase 3C；当前工作目录不含 `.git` |
+| Git 基线 | 本 Git 副本基于 `f1b8805`；原冻结目录 `C:/program1/coding/OKX` 保留旧源码 |
 | Safety / Correctness | Phase 0/1 已完成 |
 | Performance | Phase 2 已封板，`STOP_PHASE_2_PERFORMANCE_WORK` |
 | Engineering Baseline | Phase 3A 已完成 |
 | CI Integration | Phase 3B 已完成 |
 | First Commit Safety Audit | Phase 3C 已完成，`BLOCKER=0`、`P1=0` |
-| 本开发副本完整质量门 | 2026-10-16 Windows：872/872 tests、Ruff、Mypy 通过；见 [P1 验收](docs/strategy-contract-validation.md) |
+| 本开发副本完整质量门 | 2026-10-20 Windows：1069/1069 tests、80 security smoke、Ruff、Mypy 通过；见 [离线组合验收](docs/portfolio-backtest.md) |
 | 干净 clone 基线 | 历史 Phase 3C 记录 698/698 tests、80/80 security smoke；本次未重验 |
 | GitHub Actions | 配置 Windows 与 Ubuntu 矩阵；远端运行结果不在本文中静态宣称 |
 | 实盘交易 | 不支持，代码和配置均 fail closed |
 
 Phase 3C 的 698/703 项测试计数是历史验收记录。本隔离开发副本包含后续回测、快照和 V3
-策略契约改进，当前完整回归为 872 项。原冻结目录保持不变；未重新验证干净 clone 或远端 CI。
+策略契约及存储/CLI 改进（前序分别 898、971 项），前序运行观测 P2 完整回归为 1011 项，本轮组合管理新增 58 项，完整回归为 1069 项。原冻结目录保持不变；本轮尚未推送或运行新的远端 CI。
 
 ## 核心能力
+
+持续运行的只读状态入口为 `python -m app.main runtime-status --database <db> --run-id <id>`。
+本地故障恢复演示为 `python -m scripts.demo_runtime_recovery --output <新的目录>`，不访问账户或网络。
+事件保留、状态含义及恢复边界见 [持续运行故障处理](docs/runtime-recovery.md)。
 
 - 配置驱动：YAML 与环境变量合并，环境变量优先。
 - 策略注册：`buy_and_hold`、`moving_average_cross`、`vwap_mean_reversion`，以及五类仅研究的 V3 候选。
@@ -45,7 +49,8 @@ Phase 3C 的 698/703 项测试计数是历史验收记录。本隔离开发副�
 - 独立研究快照：冻结源码目录、参数、锁定依赖和数据，支持迁移后隔离复现；旧批次保留原件并
   标明事后归档边界。入口及限制见 [docs/research-snapshots.md](docs/research-snapshots.md)。
 - V3 策略契约：研究、回测和显式只读逐根输入共用版本化策略、参数校验、预热与状态恢复。
-  本开发副本与旧冻结隔离，支持范围见 [docs/strategy-contract.md](docs/strategy-contract.md)。
+  本开发副本与旧冻结隔离；当前版本为 `v3_step_v2`，统一事件时钟，支持范围见
+  [docs/strategy-contract.md](docs/strategy-contract.md)，本轮补全见 [2026-10-20 记录](docs/strategy-contract-followup-20261020.md)。
 
 ## 架构概览
 
@@ -383,3 +388,9 @@ tests/           单元、集成、故障恢复和安全边界测试
 - [CI 说明](docs/ci.md)
 - [Phase 2 性能封板](docs/phase-2-performance-closure.md)
 - [Phase 3C 首次提交安全审计](docs/phase-3c-first-commit-safety-audit.md)
+
+## 单账户离线组合
+
+`python -m scripts.demo_portfolio --output artifacts/portfolio_demo_new` 使用两个策略实例共享 100 USDT，
+展示固定分区预算、共享 K 线成交量、持仓归属和带挂单的检查点恢复。仅使用合成行情，报告不授予交易权限。
+本地 CSV 入口、资金与成本口径及恢复边界见 [离线组合回测](docs/portfolio-backtest.md)。

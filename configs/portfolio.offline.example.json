@@ -1,0 +1,28 @@
+{
+  "backtest": {
+    "initial_capital": "100",
+    "fee_rate": "0.001",
+    "slippage_rate": "0.0005"
+  },
+  "risk": {
+    "max_order_notional": "80",
+    "max_total_exposure": "100",
+    "max_orders_per_minute": 10
+  },
+  "instances": [
+    {
+      "instance_id": "alpha",
+      "priority": 0,
+      "allocation": "60",
+      "strategy": {"name": "buy_and_hold", "parameters": {}},
+      "order_notional": "80"
+    },
+    {
+      "instance_id": "beta",
+      "priority": 1,
+      "allocation": "40",
+      "strategy": {"name": "buy_and_hold", "parameters": {}},
+      "order_notional": "80"
+    }
+  ]
+}

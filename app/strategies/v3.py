@@ -54,7 +54,7 @@ class OrderCheckpoint(BaseModel):
 
 class V3Checkpoint(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    format_version: Literal[1]
+    format_version: Literal[2]
     strategy_id: str
     implementation_version: str
     parameters: dict[str, Any]
@@ -67,10 +67,12 @@ class V3Checkpoint(BaseModel):
     position: Decimal = Field(ge=0, allow_inf_nan=False)
     entered_at: datetime | None
     orders: list[OrderCheckpoint]
+    last_event_at: datetime
 
 
 class V3Strategy:
-    implementation_version = "v3_step_v1"
+    implementation_version = "v3_step_v2"
+    state_contract_version = 2
     description = (
         "V3 causal entry episode with confirmed 1H/4H inputs and a fixed 24H holding limit"
     )
@@ -91,6 +93,7 @@ class V3Strategy:
         self._position = Decimal("0")
         self._orders: dict[str, OrderCheckpoint] = {}
         self._instrument_id: str | None = None
+        self._last_event_at: datetime | None = None
 
     @property
     def name(self) -> str:
@@ -113,6 +116,11 @@ class V3Strategy:
         return tuple(sorted(key for key, order in self._orders.items() if order.state in _OPEN))
 
     def _validate_context(self, context: StrategyContext) -> None:
+        now = context.now
+        if now.tzinfo is None or now.utcoffset() != timedelta(0):
+            raise ValueError("V3 event clock must be aware UTC")
+        if self._last_event_at is not None and now < self._last_event_at:
+            raise ValueError("out-of-order V3 event clock; state unchanged")
         if context.strategy_name != self.name or context.bar.lower() != "1h":
             raise ValueError("V3 strategy identity/timeframe mismatch")
         if context.instrument.instrument_type not in self.supported_market_types:
@@ -138,6 +146,7 @@ class V3Strategy:
             raise ValueError("nonflat V3 start requires a compatible checkpoint")
         self._instrument_id = context.instrument.instrument_id
         self._started = True
+        self._last_event_at = context.now
 
     def on_stop(self, context: StrategyContext) -> None:
         self._validate_context(context)
@@ -162,6 +171,7 @@ class V3Strategy:
         flag, _, _ = self._features.update(bar)
         entry = flag and not self._previous
         self._previous = flag
+        self._last_event_at = context.now
         if context.is_warmup:
             return []
         self._live_started = True
@@ -262,12 +272,13 @@ class V3Strategy:
         for key in terminal[:-128]:
             del self._orders[key]
         self._position, self._entered_at = position, entered
+        self._last_event_at = context.now
 
     def checkpoint_state(self) -> dict[str, Any]:
-        if not self._started:
+        if not self._started or self._last_event_at is None:
             raise ValueError("cannot checkpoint an uninitialized V3 strategy")
         state = V3Checkpoint(
-            format_version=1,
+            format_version=2,
             strategy_id=self.name,
             implementation_version=self.implementation_version,
             parameters=self.parameter_values,
@@ -285,6 +296,7 @@ class V3Strategy:
             position=self._position,
             entered_at=self._entered_at,
             orders=list(self._orders.values()),
+            last_event_at=self._last_event_at,
         ).model_dump(mode="json")
         return {**state, "state_hash": canonical_hash(state)}
 
@@ -301,7 +313,18 @@ class V3Strategy:
         content = {key: value for key, value in state.items() if key != "state_hash"}
         if canonical_hash(content) != state.get("state_hash"):
             raise ValueError("V3 checkpoint hash mismatch")
+        if (
+            type(content.get("format_version")) is not int
+            or content["format_version"] != self.state_contract_version
+        ):
+            raise ValueError("incompatible V3 checkpoint format; no implicit migration")
         parsed = V3Checkpoint.model_validate(content)
+        if (
+            parsed.last_event_at.tzinfo is None
+            or parsed.last_event_at.utcoffset() != timedelta(0)
+            or parsed.last_event_at != context.now
+        ):
+            raise ValueError("V3 checkpoint event clock differs from the resume clock")
         if (
             parsed.strategy_id,
             parsed.implementation_version,
@@ -354,3 +377,4 @@ class V3Strategy:
         )
         self._orders, self._instrument_id = orders, parsed.instrument_id
         self._live_started, self._started = parsed.live_started, True
+        self._last_event_at = parsed.last_event_at

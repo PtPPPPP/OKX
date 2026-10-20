@@ -84,7 +84,9 @@ class TradingEngine:
         event_bus: EventBus,
         protective_exits: ProtectiveExitPolicy,
         repository: EngineRepository | None = None,
+        strategy_instance_id: str = "",
     ) -> None:
+        self.strategy_instance_id = strategy_instance_id
         self.run_id = run_id
         self.mode = mode
         self.bar = bar
@@ -142,9 +144,29 @@ class TradingEngine:
         protective = self._protective_exit(context, candle)
         if protective is not None:
             signals = [protective]
+        if self.strategy_instance_id:
+            signals = [self.scope_signal(signal, index) for index, signal in enumerate(signals)]
         for signal in signals:
             self.record_signal(signal)
         return signals
+
+    def scope_signal(self, signal: Signal, index: int = 0) -> Signal:
+        if not self.strategy_instance_id:
+            return signal
+        if (
+            signal.strategy_name != self.strategy.name
+            or signal.instrument_id != self.instrument.instrument_id
+        ):
+            raise ValueError("signal identity differs from strategy instance")
+        identity = (
+            f"{self.run_id}:{self.strategy_instance_id}:{signal.timestamp.isoformat()}:"
+            f"{signal.action.value}:{index}:{signal.reason}"
+        )
+        return replace(
+            signal,
+            signal_id=hashlib.sha256(identity.encode()).hexdigest()[:32],
+            strategy_instance_id=self.strategy_instance_id,
+        )
 
     def record_signal(self, signal: Signal) -> None:
         self.signal_count += 1
@@ -177,6 +199,8 @@ class TradingEngine:
         limit_price: Decimal | None = None,
         order_type: OrderType = OrderType.LIMIT,
     ) -> EngineExecution | None:
+        if self.strategy_instance_id and signal.strategy_instance_id != self.strategy_instance_id:
+            raise ValueError("signal belongs to another strategy instance")
         if signal.action is SignalAction.HOLD:
             return None
         if order_type is not OrderType.LIMIT and not (
@@ -207,7 +231,13 @@ class TradingEngine:
         )
         side = OrderSide.BUY if signal.action is SignalAction.BUY else OrderSide.SELL
         proposed = ProposedOrder(
-            client_order_id=new_client_order_id(self.clock),
+            client_order_id=(
+                hashlib.sha256(
+                    f"{self.run_id}:{self.strategy_instance_id}:{signal.signal_id}".encode()
+                ).hexdigest()[:32]
+                if self.strategy_instance_id
+                else new_client_order_id(self.clock)
+            ),
             run_id=self.run_id,
             strategy_name=self.strategy.name,
             instrument_id=self.instrument.instrument_id,
@@ -220,6 +250,7 @@ class TradingEngine:
             mode=self.mode.value,
             bar=self.bar,
             order_source=self._order_source(signal),
+            strategy_instance_id=self.strategy_instance_id,
         )
         open_orders = tuple(self.broker.get_open_orders(self.instrument.instrument_id))
         decision = self.risk_manager.evaluate(
@@ -353,6 +384,9 @@ class TradingEngine:
         payload: dict[str, object],
         idempotency_key: str,
     ) -> None:
+        if self.strategy_instance_id:
+            payload = {"strategy_instance_id": self.strategy_instance_id, **payload}
+            idempotency_key = f"instance:{self.strategy_instance_id}:{idempotency_key}"
         if isinstance(self.strategy, StatefulStrategy):
             payload = {"strategy_identity": strategy_identity(self.strategy), **payload}
         self.event_bus.publish(
@@ -371,6 +405,7 @@ class TradingEngine:
         return (
             f"signal:{self.run_id}:{signal.strategy_name}:{signal.instrument_id}:"
             f"{signal.timestamp.isoformat()}:{signal.action.value}"
+            f"{':' + signal.signal_id if self.strategy_instance_id else ''}"
         )
 
 

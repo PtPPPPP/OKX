@@ -102,6 +102,8 @@ def configure_logging(
 ) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     root = logging.getLogger()
+    for handler in root.handlers:
+        handler.close()
     root.handlers.clear()
     root.setLevel(level.upper())
     formatter = JsonFormatter(redact_values=redact_values)

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterable, AsyncIterator
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -18,14 +19,15 @@ from app.domain.signal import SignalAction
 from app.market.historical_data import BAR_INTERVALS, MarketDataError, normalize_candles
 from app.market.providers import MarketDataProvider
 from app.market.websocket import PublicWebSocketEvent, PublicWebSocketEventType
-from app.runtime.clock import BacktestClock
+from app.runtime.clock import BacktestClock, Clock, SystemClock
 from app.services.continuous_shadow_repository import (
     ContinuousRunLock,
     ContinuousShadowRepository,
     ContinuousShadowResumeContext,
     configuration_fingerprint,
 )
-from app.storage.database import Database
+from app.services.runtime_observation import RuntimeObservation, RuntimeObserver, assess
+from app.storage.database import Database, StorageError
 from app.storage.migrations import MIGRATIONS, MigrationManager
 from app.strategies.registry import STRATEGY_REGISTRY, create_strategy
 from app.strategies.vwap_shadow import VWAPShadowStrategy
@@ -116,6 +118,8 @@ class ContinuousVWAPShadowRunner:
         history: MarketDataProvider,
         *,
         fault_injector: FaultInjector | None = None,
+        observation_clock: Clock | None = None,
+        heartbeat_seconds: float = 10,
     ) -> None:
         self.database = database
         self.config = config
@@ -124,6 +128,12 @@ class ContinuousVWAPShadowRunner:
         self.repository = ContinuousShadowRepository(database, fault_injector=fault_injector)
         self.session: ContinuousShadowSession | None = None
         self._blocked = False
+        if heartbeat_seconds <= 0:
+            raise ValueError("heartbeat interval must be positive")
+        self.observation_clock = observation_clock or SystemClock()
+        self.heartbeat_seconds = heartbeat_seconds
+        self.observer: RuntimeObserver | None = None
+        self._recovery_pending = False
 
     def start_session(self, *, resume_run_id: str | None = None) -> ContinuousShadowSession:
         if self._blocked:
@@ -147,10 +157,22 @@ class ContinuousVWAPShadowRunner:
                 raise RuntimeError("continuous VWAP Shadow resume state does not exist")
             self._validate_resume_context(context, settings)
 
-        bootstrap = self._bootstrap(settings)
         lock = ContinuousRunLock(self.database, lock_name="continuous-vwap-shadow")
         lock.acquire(run_id)
         try:
+            self.observer = RuntimeObserver(
+                self.database,
+                RuntimeObservation(
+                    run_id,
+                    "shadow",
+                    _STRATEGY_VERSION,
+                    self.observation_clock.now().isoformat(),
+                    private_connection="not_applicable",
+                ),
+                self.observation_clock,
+            )
+            self.observer.persist()
+            bootstrap = self._bootstrap(settings)
             strategy = create_strategy(
                 self.config.strategy.name,
                 self.config.strategy.parameters,
@@ -208,10 +230,26 @@ class ContinuousVWAPShadowRunner:
                     "bootstrap_latest_confirmed_timestamp": bootstrap[-1].timestamp.isoformat(),
                 },
             )
-        except Exception:
-            lock.release(run_id, "continuous_vwap_shadow_start_failed")
+        except Exception as exc:
+            self._blocked = True
+            try:
+                if self.observer is not None:
+                    self.observer.state.lifecycle = "blocked"
+                    self.observer.state.stop_reason = f"startup_failed:{type(exc).__name__}"
+                    self.observer.alert("checkpoint_invalid")
+                    self.observer.persist()
+                self.repository.finish(
+                    run_id, "failed", f"startup_failed:{type(exc).__name__}", touch_heartbeat=False
+                )
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "startup failure evidence could not be persisted", extra={"run_id": run_id}
+                )
+            finally:
+                lock.release(run_id, "continuous_vwap_shadow_start_failed")
             raise
         self.session = session
+        self._recovery_pending = resume_run_id is not None
         return session
 
     def handle_ws_connected(self, session: ContinuousShadowSession, generation: int) -> None:
@@ -221,6 +259,7 @@ class ContinuousVWAPShadowRunner:
             raise ValueError("connection generation must be positive")
         session.connection_generation = generation
         session.lifecycle_state = ContinuousShadowLifecycle.READY
+        self._observe(session)
 
     def handle_ws_disconnected(self, session: ContinuousShadowSession, generation: int) -> None:
         if generation != session.connection_generation:
@@ -231,6 +270,9 @@ class ContinuousVWAPShadowRunner:
         }:
             session.disconnect_count += 1
             session.lifecycle_state = ContinuousShadowLifecycle.STALE
+            self._observe(session)
+            if self.observer is not None:
+                self.observer.alert("public_disconnected")
 
     def handle_ws_reconnected(self, session: ContinuousShadowSession, generation: int) -> None:
         if session.lifecycle_state is not ContinuousShadowLifecycle.STALE:
@@ -239,18 +281,33 @@ class ContinuousVWAPShadowRunner:
             raise RuntimeError("reconnect generation must advance")
         session.connection_generation = generation
         session.lifecycle_state = ContinuousShadowLifecycle.RECONCILING
+        self._observe(session)
 
     async def reconcile_after_reconnect(self, session: ContinuousShadowSession) -> None:
         if session.lifecycle_state is not ContinuousShadowLifecycle.RECONCILING:
             raise RuntimeError("reconciliation requires reconnecting state")
         try:
-            await asyncio.to_thread(self._reconcile_from_persisted_checkpoint, session)
-        except Exception:
+            worker = asyncio.create_task(
+                asyncio.to_thread(self._reconcile_from_persisted_checkpoint, session)
+            )
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                # Cancelling to_thread alone leaves a writer behind. Join it
+                # before releasing the lease; the provider owns its I/O timeout.
+                session.stop_requested = True
+                await asyncio.gather(worker, return_exceptions=True)
+                raise
+        except Exception as exc:
             session.lifecycle_state = ContinuousShadowLifecycle.BLOCKED
             self._blocked = True
+            self._record_failure(session, exc)
             raise
         if session.lifecycle_state is ContinuousShadowLifecycle.RECONCILING:
             session.lifecycle_state = ContinuousShadowLifecycle.READY
+            if self.observer is not None:
+                self.observer.alert("public_disconnected", active=False)
+            self._observe(session)
 
     def handle_live_candle(
         self,
@@ -259,6 +316,10 @@ class ContinuousVWAPShadowRunner:
         *,
         generation: int | None = None,
     ) -> bool:
+        if self.observer is not None and (
+            generation is None or generation == session.connection_generation
+        ):
+            self.observer.state.market_received_at = self.observation_clock.now().isoformat()
         if not session.can_process_live_candle or (
             generation is not None and generation != session.connection_generation
         ):
@@ -280,9 +341,10 @@ class ContinuousVWAPShadowRunner:
             if candle.timestamp != session.live_boundary + interval:
                 raise MarketDataError("public candle continuity is not restored")
             self._process(session, candle)
-        except Exception:
+        except Exception as exc:
             session.lifecycle_state = ContinuousShadowLifecycle.BLOCKED
             self._blocked = True
+            self._record_failure(session, exc)
             raise
         return True
 
@@ -295,10 +357,16 @@ class ContinuousVWAPShadowRunner:
         final_status: str = "stopped",
     ) -> None:
         session.stop_requested = True
-        if persist:
-            self.repository.finish(session.run_id, final_status, reason)
-        session.lifecycle_state = ContinuousShadowLifecycle.STOPPED
-        self._release_lock(session, "continuous_vwap_shadow_finished")
+        try:
+            if persist:
+                self.repository.finish(session.run_id, final_status, reason)
+                if self.observer is not None:
+                    self.observer.state.lifecycle = final_status
+                    self.observer.state.stop_reason = reason
+                    self.observer.persist()
+            session.lifecycle_state = ContinuousShadowLifecycle.STOPPED
+        finally:
+            self._release_lock(session, "continuous_vwap_shadow_finished")
 
     async def run(
         self,
@@ -328,15 +396,13 @@ class ContinuousVWAPShadowRunner:
                 final_status="interrupted",
             )
             raise
-        except Exception:
-            self.repository.finish(
-                session.run_id,
-                "failed",
-                "continuous_vwap_shadow_runtime_failure",
-                touch_heartbeat=False,
-            )
-            self._release_lock(session, "continuous_vwap_shadow_failed")
+        except Exception as exc:
+            self._record_failure(session, exc)
             raise
+        finally:
+            close = getattr(live_candles, "aclose", None)
+            if callable(close):
+                await close()
 
     async def run_events(
         self,
@@ -358,7 +424,12 @@ class ContinuousVWAPShadowRunner:
                 waiting: set[asyncio.Task[object]] = {next_event}
                 if reconciliation is not None:
                     waiting.add(reconciliation)
-                done, _ = await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
+                done, _ = await asyncio.wait(
+                    waiting, timeout=self.heartbeat_seconds, return_when=asyncio.FIRST_COMPLETED
+                )
+                if not done:
+                    self.pulse(session)
+                    continue
 
                 if next_event in done:
                     try:
@@ -372,6 +443,8 @@ class ContinuousVWAPShadowRunner:
                         self.handle_ws_disconnected(session, event.generation)
                     elif event.event_type is PublicWebSocketEventType.RECONNECTED:
                         self.handle_ws_reconnected(session, event.generation)
+                        if reconciliation is not None:
+                            await reconciliation
                         reconciliation = asyncio.create_task(
                             self.reconcile_after_reconnect(session)
                         )
@@ -397,23 +470,25 @@ class ContinuousVWAPShadowRunner:
             self.stop_session(session)
             return self._result(session)
         except asyncio.CancelledError:
+            session.stop_requested = True
+            if reconciliation is not None:
+                reconciliation.cancel()
+                await asyncio.gather(reconciliation, return_exceptions=True)
             self.stop_session(
                 session,
                 reason="continuous_vwap_shadow_task_cancelled",
                 final_status="interrupted",
             )
             raise
-        except Exception:
+        except Exception as exc:
             if session.lifecycle_state is not ContinuousShadowLifecycle.BLOCKED:
                 session.lifecycle_state = ContinuousShadowLifecycle.BLOCKED
                 self._blocked = True
-            self.repository.finish(
-                session.run_id,
-                "failed",
-                "continuous_vwap_shadow_runtime_failure",
-                touch_heartbeat=False,
-            )
-            self._release_lock(session, "continuous_vwap_shadow_failed")
+            session.stop_requested = True
+            if reconciliation is not None:
+                reconciliation.cancel()
+                await asyncio.gather(reconciliation, return_exceptions=True)
+            self._record_failure(session, exc)
             raise
         finally:
             pending = [
@@ -425,8 +500,82 @@ class ContinuousVWAPShadowRunner:
                 task.cancel()
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
+            await asyncio.gather(
+                *[task for task in (next_event, reconciliation) if task is not None],
+                return_exceptions=True,
+            )
+            close = getattr(iterator, "aclose", None)
+            if callable(close):
+                await close()
+
+    def _observe(self, session: ContinuousShadowSession) -> None:
+        if self.observer is None:
+            return
+        self.observer.state.lifecycle = session.lifecycle_state.value
+        self.observer.state.public_connection = (
+            "connected"
+            if session.lifecycle_state is ContinuousShadowLifecycle.READY
+            else session.lifecycle_state.value
+        )
+        self.observer.state.public_reconnects = max(0, session.connection_generation - 1)
+        self.observer.state.checkpoint = (
+            session.last_committed_checkpoint.isoformat()
+            if session.last_committed_checkpoint
+            else None
+        )
+        self.observer.persist()
+
+    def pulse(self, session: ContinuousShadowSession) -> None:
+        """Heartbeat, lease renewal and independent market/progress watchdog."""
+        self._observe(session)
+        session.lock.renew(session.run_id)
+        assert self.observer is not None
+        health = assess(asdict(self.observer.state), self.observation_clock.now())
+        for reason in ("market_stale", "progress_stalled"):
+            if reason in health["blocking_reasons"]:
+                self.observer.alert(reason)
+                session.lifecycle_state = ContinuousShadowLifecycle.BLOCKED
+                self._blocked = True
+                self.observer.state.lifecycle = "blocked"
+                self.observer.state.stop_reason = reason
+                self.observer.persist()
+                raise MarketDataError(reason)
+
+    def _record_failure(self, session: ContinuousShadowSession, error: Exception) -> None:
+        self._blocked = True
+        session.lifecycle_state = ContinuousShadowLifecycle.BLOCKED
+        try:
+            if self.observer is not None:
+                self.observer.state.lifecycle = "blocked"
+                self.observer.state.stop_reason = (
+                    self.observer.state.stop_reason or type(error).__name__
+                )
+                self.observer.alert(
+                    "storage_failure" if isinstance(error, StorageError) else "task_failed"
+                )
+                self.observer.persist()
+            self.repository.finish(
+                session.run_id,
+                "failed",
+                self.observer.state.stop_reason if self.observer else type(error).__name__,
+                touch_heartbeat=False,
+            )
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "runtime failure evidence could not be persisted", extra={"run_id": session.run_id}
+            )
+        finally:
+            try:
+                self._release_lock(session, "continuous_vwap_shadow_failed")
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "runtime lease release failed; stale-owner recovery required",
+                    extra={"run_id": session.run_id},
+                )
 
     def _process(self, session: ContinuousShadowSession, candle: Candle) -> None:
+        if session.stop_requested:
+            raise RuntimeError("checkpoint reconciliation stopped")
         settings = self._settings()
         session.clock.advance_to(candle.timestamp + BAR_INTERVALS[_BAR])
         signal = session.strategy.on_bar(
@@ -479,6 +628,14 @@ class ContinuousVWAPShadowRunner:
         session.processed += 1
         session.last_committed_checkpoint = candle.timestamp
         session.live_boundary = candle.timestamp
+        if self.observer is not None:
+            self.observer.state.confirmed_processed_at = self.observation_clock.now().isoformat()
+            if self._recovery_pending:
+                for code in ("storage_failure", "task_failed", "market_stale", "progress_stalled"):
+                    self.observer.alert(code, active=False)
+                self._recovery_pending = False
+            self._observe(session)
+        session.lock.renew(session.run_id)
 
     def _reconcile_from_persisted_checkpoint(self, session: ContinuousShadowSession) -> None:
         settings = self._settings()
@@ -486,6 +643,7 @@ class ContinuousVWAPShadowRunner:
         if context is None:
             raise MarketDataError("reconnect has no persisted VWAP checkpoint")
         self._validate_resume_context(context, settings)
+        self._validate_checkpoint_history(context, settings)
         session.strategy.restore_checkpoint_state(context.runtime_state)
         session.last_committed_checkpoint = context.checkpoint
         session.live_boundary = context.checkpoint
@@ -635,7 +793,7 @@ class ContinuousVWAPShadowRunner:
         historical = self.history.get_historical_bars(
             _INSTRUMENT,
             _BAR,
-            limit=settings.vwap_window + settings.bootstrap_margin,
+            limit=_RECONCILIATION_LIMIT,
         )
         normalized = normalize_candles(
             [candle for candle in historical if candle.confirmed], bar=_BAR
@@ -649,3 +807,12 @@ class ContinuousVWAPShadowRunner:
             or [candle.timestamp.isoformat() for candle in window] != checkpoint_times
         ):
             raise MarketDataError("continuous VWAP Shadow checkpoint history does not align")
+        for candle, saved in zip(window, bars, strict=True):
+            assert isinstance(saved, dict)
+            if saved.get("confirmed") is not True or any(
+                Decimal(str(saved[field])) != getattr(candle, field)
+                for field in ("open", "high", "low", "close", "volume")
+            ):
+                raise MarketDataError(
+                    "continuous VWAP Shadow checkpoint history content does not match"
+                )

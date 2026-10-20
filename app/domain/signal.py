@@ -26,3 +26,4 @@ class Signal:
     suggested_quantity: Decimal | None = None
     suggested_notional: Decimal | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    strategy_instance_id: str = ""

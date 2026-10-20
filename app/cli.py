@@ -17,13 +17,14 @@ from app.bootstrap import (
     build_backtest_session,
     build_demo_evaluation_session,
     build_public_observe_session,
+    open_demo_proposal_application,
 )
 from app.config.run_config import RunConfig, load_run_config
 from app.config.settings import Settings, TradingMode
 from app.continuous_shadow_cli import app as continuous_shadow_app
 from app.domain.market import Instrument
-from app.domain.order import OrderSide, OrderState, OrderType
-from app.exchange.exceptions import AuthenticationError, ExchangeError, NetworkError, OrderRejected
+from app.domain.order import OrderSide, OrderType
+from app.exchange.exceptions import AuthenticationError, ExchangeError
 from app.exchange.okx_client import OkxClient
 from app.market.historical_data import save_candles_csv
 from app.market.websocket import OKXPublicWebSocketProvider
@@ -33,14 +34,11 @@ from app.services.bounded_demo import BoundedDemoConfiguration, BoundedDemoEngin
 from app.services.continuous_demo import ContinuousDemoConfiguration, ContinuousDemoEngine
 from app.services.continuous_runtime_safety import ShadowAccountBaselineRepository
 from app.services.continuous_shadow_repository import ContinuousShadowRepository
-from app.services.controlled_demo_write import ControlledDemoWriteService
 from app.services.demo_doctor import DemoDoctor
 from app.services.demo_order_preflight import (
     DemoOrderIntent,
     DemoOrderPreflightService,
-    ProposalStatus,
 )
-from app.services.demo_order_revalidation import DemoOrderProposalRevalidator
 from app.services.demo_orders import DemoOrderService
 from app.services.demo_session import DemoTradingSession
 from app.services.private_state_coordinator import PrivateStateCoordinator
@@ -1404,25 +1402,14 @@ def revalidate_demo_order_proposal(
     config_path: Annotated[Path, typer.Option("--config")] = Path("configs/btc_ma_demo.yaml"),
 ) -> None:
     config, settings, repository, client = _demo("revalidate-demo-order-proposal", config_path)
-    session = DemoTradingSession(config, settings, client, repository)
     try:
-        session.start()
-        result = asyncio.run(
-            DemoOrderProposalRevalidator(
-                repository,
-                client,
-                websocket_ready=session.order_submission_ready,
-                reconcile=lambda _instrument: session.reconcile_result(),
-            ).revalidate(proposal_id)
-        )
-        typer.echo(json.dumps(asdict(result), ensure_ascii=False, default=str))
-        if not result.passed:
-            raise typer.Exit(code=1)
+        with open_demo_proposal_application(config, settings, repository, client) as application:
+            result = application.revalidate(proposal_id)
+            typer.echo(json.dumps(asdict(result), ensure_ascii=False, default=str))
+            if not result.passed:
+                raise typer.Exit(code=1)
     except (ExchangeError, StorageError, RuntimeError, ValueError) as exc:
         _fail(str(exc))
-    finally:
-        session.close()
-        client.close()
 
 
 @app.command("submit-demo-order")
@@ -1435,90 +1422,22 @@ def submit_demo_order(
     if not confirm_demo_order:
         _fail("must explicitly provide --confirm-demo-order")
     config, settings, repository, client = _demo("submit-demo-order", config_path)
-    session = DemoTradingSession(config, settings, client, repository)
     try:
-        session.start()
-        proposal = repository.load_demo_order_proposal(proposal_id)
-        if proposal is None:
-            _fail("proposal not found")
-        check = asyncio.run(
-            DemoOrderProposalRevalidator(
-                repository,
-                client,
-                websocket_ready=session.order_submission_ready,
-                reconcile=lambda _instrument: session.reconcile_result(),
-            ).revalidate(proposal_id)
-        )
-        if not check.passed:
-            _fail(f"proposal revalidation failed: {check.reason}")
-        proposal = repository.load_demo_order_proposal(proposal_id)
-        if proposal is None:
-            _fail("proposal disappeared")
-        local_order = repository.begin_controlled_demo_submission(proposal)
-        try:
-            remote_order = ControlledDemoWriteService(repository, client).place_order(local_order)
-        except OrderRejected:
-            local_order.transition(OrderState.REJECTED, at=client.clock.now())
-            repository.complete_controlled_demo_submission(
-                proposal_id,
-                local_order,
-                event_type="submission_failed",
-                proposal_status=ProposalStatus.CONSUMED,
-            )
-            raise
-        except NetworkError:
-            local_order.transition(OrderState.UNKNOWN, at=client.clock.now())
-            repository.complete_controlled_demo_submission(
-                proposal_id,
-                local_order,
-                event_type="submission_unknown",
-                proposal_status=ProposalStatus.UNKNOWN,
-            )
-            raise
-        except ExchangeError as exc:
-            if any(code in str(exc) for code in ("502", "503", "504")):
-                repository.mark_controlled_demo_submission_unknown(
-                    proposal_id, error_category="exchange_unavailable", http_status=503
+        with open_demo_proposal_application(config, settings, repository, client) as application:
+            confirmed = application.submit(proposal_id)
+            typer.echo(
+                json.dumps(
+                    {
+                        "proposal_id": proposal_id,
+                        **_order_summary(confirmed),
+                        "submission_performed": True,
+                        "environment": "demo",
+                    },
+                    ensure_ascii=False,
                 )
-            else:
-                # The POST may already have been accepted by the exchange; any
-                # ambiguous transport/business outcome must freeze to `unknown`
-                # so recovery (read-only, clOrdId-based) can resolve it instead
-                # of leaving the proposal stuck in submission_in_progress.
-                repository.mark_controlled_demo_submission_unknown(
-                    proposal_id,
-                    error_category=f"exchange_error_after_submit_attempt:{type(exc).__name__}",
-                    http_status=None,
-                )
-            raise
-        repository.complete_controlled_demo_submission(
-            proposal_id,
-            remote_order,
-            event_type="submission_succeeded",
-            proposal_status=ProposalStatus.SUBMITTED,
-        )
-        reconciliation = session.reconcile_result()
-        if not reconciliation.order_submission_allowed:
-            _fail(f"订单提交后对账未通过: {reconciliation.message}")
-        confirmed = repository.load_order(proposal.client_order_id)
-        if confirmed is None:
-            _fail("订单提交后受控对账未获得本地状态")
-        typer.echo(
-            json.dumps(
-                {
-                    "proposal_id": proposal_id,
-                    **_order_summary(confirmed),
-                    "submission_performed": True,
-                    "environment": "demo",
-                },
-                ensure_ascii=False,
             )
-        )
     except (ExchangeError, StorageError, RuntimeError, ValueError) as exc:
         _fail(str(exc))
-    finally:
-        session.close()
-        client.close()
 
 
 @app.command("demo-doctor")

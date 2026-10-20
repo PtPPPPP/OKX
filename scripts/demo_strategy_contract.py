@@ -90,6 +90,7 @@ def main() -> int:
         expected != actual
         or resumed != expected[midpoint - 300 :]
         or batch.checkpoint_state() != stepped.checkpoint_state()
+        or restored.checkpoint_state() != batch.checkpoint_state()
     ):
         raise ValueError("strategy contract mismatch; no success report published")
     args.output.mkdir(parents=True, exist_ok=False)
@@ -114,6 +115,7 @@ def main() -> int:
         "signal_fingerprint": canonical_hash(batch_rows),
         "batch_equals_step": True,
         "resume_equals_continuous": True,
+        "resumed_state_equals_continuous": True,
         "orders_or_fills_inferred": False,
         "trading_permission": False,
     }

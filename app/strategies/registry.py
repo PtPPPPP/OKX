@@ -40,6 +40,7 @@ class StrategyRegistration:
     shadow_only: bool = False
     implementation_version: str = "legacy_unversioned"
     research_only: bool = False
+    state_contract_version: int | None = None
 
 
 def _moving_average_factory(parameters: BaseModel) -> Strategy:
@@ -115,6 +116,7 @@ for _name, _model in V3_PARAMETER_MODELS.items():
         supported_market_types=V3Strategy.supported_market_types,
         implementation_version=V3Strategy.implementation_version,
         research_only=True,
+        state_contract_version=V3Strategy.state_contract_version,
     )
 
 
@@ -143,7 +145,7 @@ def configuration_identity(
         "strategy_id": name,
         "implementation_version": registration.implementation_version,
         "parameters": validated.model_dump(mode="json"),
-        "state_contract_version": 1 if registration.research_only else None,
+        "state_contract_version": registration.state_contract_version,
     }
 
 
@@ -183,6 +185,7 @@ def strategy_descriptions() -> list[dict[str, Any]]:
                     item.value for item in registration.supported_market_types
                 ),
                 "implementation_version": registration.implementation_version,
+                "state_contract_version": registration.state_contract_version,
                 "research_only": registration.research_only,
             }
         )

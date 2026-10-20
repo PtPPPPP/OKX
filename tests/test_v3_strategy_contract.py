@@ -274,7 +274,7 @@ def test_bad_input_is_rejected_without_state_change(kind: str) -> None:
 @pytest.mark.parametrize(
     "field,value",
     [
-        ("format_version", 2),
+        ("format_version", V3Strategy.state_contract_version + 1),
         ("implementation_version", "other"),
         ("previous", True),
         ("bar_count", 999),

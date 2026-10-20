@@ -66,25 +66,26 @@ class TradingSession:
             "instrument_id": self.descriptor.instrument_id,
             "bar": self.descriptor.bar,
         }
-        self._record("run_started", self.descriptor.config_snapshot, dimensions)
-        self._record("instrument_snapshot", asdict(self.instrument), dimensions)
         failure: BaseException | None = None
         try:
+            self._record("run_started", self.descriptor.config_snapshot, dimensions)
+            self._record("instrument_snapshot", asdict(self.instrument), dimensions)
             if self.before_run is not None:
                 self.before_run()
             result = self.runner.run()
             if self.result_handler is not None:
                 self.result_handler(result)
-            self.repository.save_audit_records(
-                [
-                    {
-                        "record_type": "domain_event",
-                        "payload": asdict(event),
-                        **dimensions,
-                    }
-                    for event in self.event_bus.events
-                ]
-            )
+            if not self.event_bus.durable:
+                self.repository.save_audit_records(
+                    [
+                        {
+                            "record_type": "domain_event",
+                            "payload": asdict(event),
+                            **dimensions,
+                        }
+                        for event in self.event_bus.events
+                    ]
+                )
             self._record("run_completed", {"status": "completed"}, dimensions)
             return result
         except BaseException as exc:

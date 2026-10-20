@@ -7,7 +7,7 @@ from decimal import Decimal, InvalidOperation
 from itertools import pairwise
 from pathlib import Path
 
-from app.domain.market import Candle
+from app.domain.market import Candle, validate_confirmed_bar
 
 
 class MarketDataError(ValueError):
@@ -104,7 +104,7 @@ def save_candles_csv(candles: Iterable[Candle], path: Path) -> None:
             )
 
 
-def load_candles_csv(path: Path, *, bar: str) -> list[Candle]:
+def load_candles_csv(path: Path, *, bar: str, strict: bool = False) -> list[Candle]:
     if not path.is_file():
         raise MarketDataError(f"K 线文件不存在: {path}")
     candles: list[Candle] = []
@@ -115,9 +115,10 @@ def load_candles_csv(path: Path, *, bar: str) -> list[Candle]:
             if not reader.fieldnames or not required.issubset(reader.fieldnames):
                 raise MarketDataError("CSV 缺少必要列")
             for row in reader:
+                timestamp = datetime.fromisoformat(row["timestamp"])
                 candles.append(
                     Candle(
-                        timestamp=datetime.fromisoformat(row["timestamp"]).astimezone(UTC),
+                        timestamp=timestamp if strict else timestamp.astimezone(UTC),
                         open=Decimal(row["open"]),
                         high=Decimal(row["high"]),
                         low=Decimal(row["low"]),
@@ -130,6 +131,15 @@ def load_candles_csv(path: Path, *, bar: str) -> list[Candle]:
         if isinstance(exc, MarketDataError):
             raise
         raise MarketDataError(f"CSV K 线格式错误: {exc}") from exc
+    if strict:
+        interval = BAR_INTERVALS.get(bar.lower())
+        if interval is None:
+            raise MarketDataError(f"不支持的 K 线周期: {bar}")
+        previous: Candle | None = None
+        for candle in candles:
+            validate_confirmed_bar(candle, previous, interval=interval)
+            previous = candle
+        return candles
     return normalize_candles(candles, bar=bar)
 
 

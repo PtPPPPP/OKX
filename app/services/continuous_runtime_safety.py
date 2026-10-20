@@ -217,20 +217,31 @@ class ContinuousTaskSupervisor:
         if not tasks:
             return TaskSupervisorResult("completed")
         worker_map = workers or {}
+        if {task.name for task in tasks} != set(worker_map) or any(
+            task.restart_policy != "never" or task.maximum_restart_count != 0 for task in tasks
+        ):
+            for worker in worker_map.values():
+                if hasattr(worker, "close"):
+                    worker.close()
+            raise ValueError(
+                "supervised workers must match definitions; automatic worker restart is unsupported"
+            )
         pending: dict[str, asyncio.Task[None]] = {
             name: asyncio.create_task(worker_map[name], name=name)  # type: ignore[arg-type]
             for name in worker_map
         }
         try:
-            done, _ = await asyncio.wait(pending.values(), return_when=asyncio.FIRST_EXCEPTION)
+            done, _ = await asyncio.wait(pending.values(), return_when=asyncio.FIRST_COMPLETED)
             for task in done:
-                error = task.exception()
-                if error is not None:
-                    name = task.get_name()
-                    definition = next((item for item in tasks if item.name == name), None)
-                    if definition is not None and definition.critical:
+                error = None if task.cancelled() else task.exception()
+                name = task.get_name()
+                definition = next(item for item in tasks if item.name == name)
+                if definition.critical or error is not None or task.cancelled():
+                    if definition.critical:
                         await self.apply_failure(run_id, name)
-                        return TaskSupervisorResult("failed", name, type(error).__name__)
+                    return TaskSupervisorResult(
+                        "failed", name, type(error).__name__ if error else "UnexpectedTaskExit"
+                    )
             return TaskSupervisorResult("completed")
         finally:
             for task in pending.values():

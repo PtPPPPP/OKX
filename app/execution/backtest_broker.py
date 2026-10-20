@@ -27,6 +27,7 @@ class Fill:
     signal_id: str
     client_order_id: str
     exit_reason: str | None = None
+    strategy_instance_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +45,7 @@ class ClosedTrade:
     pnl: Decimal
     holding_time_hours: Decimal
     exit_reason: str
+    strategy_instance_id: str = ""
 
 
 class BacktestBroker:
@@ -310,6 +312,7 @@ class BacktestBroker:
                 request.signal_id,
                 request.client_order_id,
                 exit_reason,
+                request.strategy_instance_id,
             )
         )
 
@@ -334,6 +337,7 @@ class BacktestBroker:
                 pnl,
                 Decimal(str((at - self._entered_at).total_seconds())) / Decimal("3600"),
                 reason,
+                order.request.strategy_instance_id,
             )
         )
         self.closed_trade_pnls.append(pnl)

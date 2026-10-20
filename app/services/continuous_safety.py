@@ -59,7 +59,9 @@ class ContinuousDemoReconciliationLoop:
 
     async def start(self, run_id: str, stop_event: asyncio.Event) -> None:
         while not stop_event.is_set():
-            await self.run_once(run_id)
+            result = await self.run_once(run_id)
+            if result.status != "healthy":
+                raise RuntimeError("continuous reconciliation is unhealthy")
             try:
                 await asyncio.wait_for(stop_event.wait(), 30)
             except TimeoutError:
@@ -286,6 +288,13 @@ class ContinuousDemoCircuitBreakerExecutor:
             return
         now = datetime.now(UTC).isoformat()
         with self.database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            previous = connection.execute(
+                "SELECT status,circuit_breaker_code FROM continuous_demo_runs WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            if previous and str(previous[0]) == "frozen" and str(previous[1]) == decision.code:
+                return
             connection.execute(
                 "UPDATE continuous_demo_runs SET status='frozen',stop_reason=?,circuit_breaker_action=?,circuit_breaker_code=?,circuit_breaker_severity=?,circuit_breaker_triggered_at=?,recovery_required=1 WHERE run_id=?",
                 (decision.code, decision.action, decision.code, decision.severity, now, run_id),

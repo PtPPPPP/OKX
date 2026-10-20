@@ -71,8 +71,11 @@ def test_replay_counts_and_results_identical_across_modes(tmp_path: Path, mode: 
     # Since Phase 2B3 the replay holds one scoped session connection; only the
     # handful of run-lifecycle blocks open their own connections.
     assert counts["connections_opened"] <= 8
-    assert counts["commit_calls"] == 125  # 120 candle transactions + 5 run-level blocks
-    assert counts["sql_writes"] == 621
+    # P2 adds exactly two FULL observation transactions (start/end): one status
+    # insert/update plus two lifecycle events. Per-candle business I/O is unchanged.
+    assert counts["commit_calls"] == 125 + 2
+    assert counts["sql_writes"] == 621 + 4
+    assert counts["table_writes"]["continuous_demo_run_events"] == 5
     assert counts["table_writes"]["processed_candles"] == 120
     assert counts["table_writes"]["strategy_signal_events"] == 120
 

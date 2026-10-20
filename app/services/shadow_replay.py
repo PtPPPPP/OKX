@@ -24,6 +24,7 @@ from app.services.continuous_shadow_repository import (
     ContinuousRunLock,
     ContinuousShadowRepository,
 )
+from app.services.runtime_observation import RuntimeObservation, RuntimeObserver
 from app.storage.database import Database
 from app.strategies.registry import create_strategy
 
@@ -71,26 +72,39 @@ def run_shadow_replay(
     lock = ContinuousRunLock(database)
     lock.acquire(run_id)
 
-    strategy = create_strategy(config.strategy.name, config.strategy.parameters, instrument)
-    clock = BacktestClock(selected[0].timestamp)
-    empty_portfolio = PortfolioSnapshot({}, {}, {}, trusted_for_trading=False)
-    strategy.on_start(
-        StrategyContext(
-            run_id,
-            TradingMode.DEMO,
-            strategy.name,
-            instrument,
-            config.market.bar,
-            empty_portfolio,
-            None,
-            clock,
-        )
-    )
-
-    evaluations = buys = holds = proposals = 0
-    buy_signal_ids: list[str] = []
-    buy_signal_times: list[str] = []
     try:
+        observer = RuntimeObserver(
+            database,
+            RuntimeObservation(
+                run_id,
+                "offline_replay",
+                _STRATEGY_VERSION,
+                datetime.now(UTC).isoformat(),
+                public_connection="local_replay",
+                private_connection="not_applicable",
+            ),
+        )
+        observer.persist()
+        last_observed_at = observer.clock.now()
+        strategy = create_strategy(config.strategy.name, config.strategy.parameters, instrument)
+        clock = BacktestClock(selected[0].timestamp)
+        empty_portfolio = PortfolioSnapshot({}, {}, {}, trusted_for_trading=False)
+        strategy.on_start(
+            StrategyContext(
+                run_id,
+                TradingMode.DEMO,
+                strategy.name,
+                instrument,
+                config.market.bar,
+                empty_portfolio,
+                None,
+                clock,
+            )
+        )
+
+        evaluations = buys = holds = proposals = 0
+        buy_signal_ids: list[str] = []
+        buy_signal_times: list[str] = []
         # Path-scoped connection owner: one configured connection for the whole
         # replay run; every candle still commits as its own atomic transaction.
         with runtime.replay_session() as session:
@@ -158,6 +172,14 @@ def run_shadow_replay(
                         f"duplicate candle rejected: {candle.timestamp.isoformat()}"
                     )
 
+                if (observer.clock.now() - last_observed_at).total_seconds() >= 10:
+                    observer.state.lifecycle = "ready"
+                    observer.state.market_received_at = observer.clock.now().isoformat()
+                    observer.state.confirmed_processed_at = observer.clock.now().isoformat()
+                    observer.state.checkpoint = candle.timestamp.isoformat()
+                    observer.persist()
+                    last_observed_at = observer.clock.now()
+
                 if signal.action is SignalAction.BUY:
                     # The canonical commit created the shadow proposal atomically,
                     # bound to this signal_id (shadow_order_proposals.signal_id).
@@ -173,6 +195,12 @@ def run_shadow_replay(
                 WHERE run_id=?""",
                 (datetime.now(UTC).isoformat(), run_id),
             )
+        observer.state.market_received_at = observer.clock.now().isoformat()
+        observer.state.confirmed_processed_at = observer.clock.now().isoformat()
+        observer.state.checkpoint = selected[-1].timestamp.isoformat()
+        observer.state.lifecycle = "stopped"
+        observer.state.stop_reason = "candle_target_reached"
+        observer.persist()
         return {
             "run_id": run_id,
             "data_hash": candles_hash(selected),

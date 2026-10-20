@@ -100,6 +100,7 @@ class BacktestEngine:
         event_bus: EventBus,
         repository: EngineRepository | None = None,
         warmup_candles: list[Candle] | None = None,
+        strategy_instance_id: str = "",
     ) -> None:
         self.run_id, self.config, self.instrument = run_id, config, instrument
         self.provider, self.strategy, self.position_sizer = provider, strategy, position_sizer
@@ -136,6 +137,7 @@ class BacktestEngine:
                 take_profit_pct=config.protective_exits.take_profit_pct,
             ),
             repository=repository,
+            strategy_instance_id=strategy_instance_id,
         )
 
     def run(self) -> BacktestResult:
@@ -383,6 +385,7 @@ class BacktestEngine:
             confidence=Decimal("1"),
             metadata={"protective_exit": True, "exit_reason": reason, "candle_confirmed": True},
         )
+        signal = self.trading_engine.scope_signal(signal)
         self.trading_engine.record_signal(signal)
         order = self._execute(signal, candle, price, limit_price=limit_price, order_type=order_type)
         if order is not None:

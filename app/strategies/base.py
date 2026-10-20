@@ -58,6 +58,9 @@ class StatefulStrategy(Strategy, Protocol):
     def implementation_version(self) -> str: ...
 
     @property
+    def state_contract_version(self) -> int: ...
+
+    @property
     def parameter_values(self) -> dict[str, Any]: ...
 
     def checkpoint_state(self) -> dict[str, Any]: ...
@@ -77,7 +80,7 @@ def strategy_identity(strategy: Strategy) -> dict[str, Any]:
             "strategy_id": strategy.name,
             "implementation_version": strategy.implementation_version,
             "parameters": strategy.parameter_values,
-            "state_contract_version": 1,
+            "state_contract_version": strategy.state_contract_version,
         }
     from app.strategies.registry import STRATEGY_REGISTRY
 
