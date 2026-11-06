@@ -16,6 +16,7 @@ from app.portfolio.ledger_storage import LedgerStore
 from app.portfolio.personal_ledger import replay
 from app.portfolio.personal_risk import RiskRequest, analyze_risk
 from app.portfolio.risk_ledger_adapter import request_from_ledger
+from scripts._console import configure_utf8_output
 from scripts.personal_ledger import read_json
 
 LOCAL_ROOT = Path(__file__).resolve().parents[1] / "data" / "personal-risk"
@@ -119,6 +120,7 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_utf8_output()
     cli = parser()
     args = cli.parse_args(argv)
     try:

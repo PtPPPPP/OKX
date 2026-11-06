@@ -19,6 +19,7 @@ from app.portfolio.personal_ledger import (
     replay,
     value_ledger,
 )
+from scripts._console import configure_utf8_output
 
 LOCAL_ROOT = Path(__file__).resolve().parents[1] / "data" / "personal-positions"
 
@@ -87,6 +88,7 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_utf8_output()
     cli = parser()
     args = cli.parse_args(argv)
     try:

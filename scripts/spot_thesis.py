@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from app.portfolio.spot_thesis import PRODUCTS, Evidence, Review, ThesisRevision, template_revision
 from app.portfolio.thesis_storage import ThesisStore
+from scripts._console import configure_utf8_output
 
 LOCAL_ROOT = Path(__file__).resolve().parents[1] / "data" / "personal-theses"
 
@@ -98,6 +99,7 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_utf8_output()
     cli = parser()
     args = cli.parse_args(argv)
     try:
