@@ -1,0 +1,57 @@
+[
+  {
+    "id": "blank-btc-usdt",
+    "instrument": "BTC-USDT",
+    "recorded_at": "2026-11-06T00:00:00Z",
+    "source": "user_to_complete",
+    "buy_reason": null,
+    "check_conditions": [],
+    "invalidation_conditions": [],
+    "review_interval_days": null,
+    "schema_version": 1
+  },
+  {
+    "id": "blank-arb-usdt",
+    "instrument": "ARB-USDT",
+    "recorded_at": "2026-11-06T00:00:00Z",
+    "source": "user_to_complete",
+    "buy_reason": null,
+    "check_conditions": [],
+    "invalidation_conditions": [],
+    "review_interval_days": null,
+    "schema_version": 1
+  },
+  {
+    "id": "blank-xintc-usdt",
+    "instrument": "XINTC-USDT",
+    "recorded_at": "2026-11-06T00:00:00Z",
+    "source": "user_to_complete",
+    "buy_reason": null,
+    "check_conditions": [],
+    "invalidation_conditions": [],
+    "review_interval_days": null,
+    "schema_version": 1
+  },
+  {
+    "id": "blank-xqqq-usdt",
+    "instrument": "XQQQ-USDT",
+    "recorded_at": "2026-11-06T00:00:00Z",
+    "source": "user_to_complete",
+    "buy_reason": null,
+    "check_conditions": [],
+    "invalidation_conditions": [],
+    "review_interval_days": null,
+    "schema_version": 1
+  },
+  {
+    "id": "blank-xaut-usdt",
+    "instrument": "XAUT-USDT",
+    "recorded_at": "2026-11-06T00:00:00Z",
+    "source": "user_to_complete",
+    "buy_reason": null,
+    "check_conditions": [],
+    "invalidation_conditions": [],
+    "review_interval_days": null,
+    "schema_version": 1
+  }
+]

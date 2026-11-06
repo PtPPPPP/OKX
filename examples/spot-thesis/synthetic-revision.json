@@ -1,0 +1,10 @@
+{
+  "id": "synthetic-btc-v1",
+  "instrument": "BTC-USDT",
+  "recorded_at": "2026-01-01T00:00:00Z",
+  "source": "synthetic_fixture_not_user_thesis",
+  "buy_reason": "纯合成测试：假设指标 A 保持在测试范围内；这不是用户的买入理由或真实投资分析。",
+  "check_conditions": [{"id":"a-positive","text":"合成指标 A 大于 3","kind":"fundamental"}],
+  "invalidation_conditions": [{"id":"a-failed","text":"合成指标 A 小于 1","kind":"fundamental"}],
+  "review_interval_days": 7
+}

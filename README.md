@@ -394,3 +394,10 @@ tests/           单元、集成、故障恢复和安全边界测试
 `python -m scripts.demo_portfolio --output artifacts/portfolio_demo_new` 使用两个策略实例共享 100 USDT，
 展示固定分区预算、共享 K 线成交量、持仓归属和带挂单的检查点恢复。仅使用合成行情，报告不授予交易权限。
 本地 CSV 入口、资金与成本口径及恢复边界见 [离线组合回测](docs/portfolio-backtest.md)。
+
+## 现货投资逻辑登记与复核
+
+`python -m scripts.spot_thesis` 提供离线理由、证据、条件和复核登记，保留全部版本及原始复核结果。
+五个指定产品初始均为待补充，未代填用户买入理由；技术指标与 72 小时不单独判定长期逻辑失效。
+使用与数据口径见 [现货逻辑登记与复核](docs/spot-thesis.md)，公共行情报告接入见
+[长周期持仓分析](docs/position-review.md)。新增模块不读取凭证、不连接私有账户、不生成交易指令。

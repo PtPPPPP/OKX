@@ -1,0 +1,12 @@
+{
+  "id": "synthetic-e1",
+  "instruments": ["BTC-USDT"],
+  "statement": "纯合成测试数据：指标 A=5，不代表真实市场事实。",
+  "classification": "fact",
+  "direction": "support",
+  "kind": "fundamental",
+  "source": "synthetic://fixture/A",
+  "published_at": "2026-01-02T00:00:00Z",
+  "collected_at": "2026-01-02T01:00:00Z",
+  "expires_at": "2026-02-01T00:00:00Z"
+}

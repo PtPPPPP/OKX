@@ -1,0 +1,20 @@
+{
+  "instruments": [
+    "BTC-USDT", "BTC-USDT-SWAP",
+    "ARB-USDT", "ARB-USDT-SWAP",
+    "XINTC-USDT", "INTC-USDT-SWAP",
+    "XQQQ-USDT", "QQQ-USDT-SWAP",
+    "XAUT-USDT", "XAU-USDT-SWAP"
+  ],
+  "spot_policy": "thesis_hold",
+  "history_days": 90,
+  "breakout_hours": 24,
+  "atr_hours": 14,
+  "trend_fast_4h": 20,
+  "trend_slow_4h": 50,
+  "stop_atr": "1.5",
+  "target_atr": "3",
+  "max_holding_hours": 72,
+  "fee_bps_per_side": "10",
+  "slippage_bps_per_side": "5"
+}

@@ -1,0 +1,13 @@
+{
+  "id": "synthetic-review-2",
+  "instrument": "BTC-USDT",
+  "revision_id": "synthetic-btc-v1",
+  "reviewed_at": "2026-01-03T02:00:00Z",
+  "reviewer": "synthetic_reviewer",
+  "notes": "合成失效情景，旧证据和第一次复核必须保留。",
+  "evidence_ids": ["synthetic-e2"],
+  "checks": [
+    {"condition_id":"a-positive","outcome":"not_met","evidence_ids":["synthetic-e2"]},
+    {"condition_id":"a-failed","outcome":"met","evidence_ids":["synthetic-e2"]}
+  ]
+}

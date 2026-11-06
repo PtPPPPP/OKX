@@ -57,3 +57,6 @@ logs/
 *.swo
 .DS_Store
 Thumbs.db
+
+data/personal-theses/
+data/personal-positions/
