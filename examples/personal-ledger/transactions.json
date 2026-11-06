@@ -1,0 +1,8 @@
+[
+  {"id":"example-in-1","kind":"transfer_in","at":"2026-01-01T01:00:00Z","source":"synthetic_example","amount":"100"},
+  {"id":"example-buy-1","kind":"buy","at":"2026-01-01T02:00:00Z","source":"synthetic_example","instrument":"BTC-USDT","quantity":"2","price":"100","fee":"2"},
+  {"id":"example-buy-2","kind":"buy","at":"2026-01-01T03:00:00Z","source":"synthetic_example","instrument":"BTC-USDT","quantity":"1","price":"130","fee":"1"},
+  {"id":"example-sell-1","kind":"sell","at":"2026-01-01T04:00:00Z","source":"synthetic_example","instrument":"BTC-USDT","quantity":"1","price":"150","fee":"1"},
+  {"id":"example-fee-1","kind":"fee","at":"2026-01-01T04:30:00Z","source":"synthetic_example","amount":"2"},
+  {"id":"example-out-1","kind":"transfer_out","at":"2026-01-01T05:00:00Z","source":"synthetic_example","amount":"50"}
+]

@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "currency": "USDT",
+  "as_of": "2026-01-02T00:00:00Z",
+  "source": "synthetic_example_not_user_assets_or_limits",
+  "positions_complete": true,
+  "cash_scope": "all_settled_excluding_derivative_pnl",
+  "cash": {
+    "balance": "1000", "available": "800", "updated_at": "2026-01-01T00:00:00Z",
+    "source": "synthetic_settled_cash_including_200_collateral", "verified": true
+  },
+  "contract_collateral": "200",
+  "spot_positions": [
+    {"instrument":"BTC-USDT","quantity":"2","updated_at":"2026-01-01T00:00:00Z","source":"synthetic","verified":true},
+    {"instrument":"XAUT-USDT","quantity":"1","updated_at":"2026-01-01T00:00:00Z","source":"synthetic","verified":true}
+  ],
+  "contracts": [
+    {
+      "id":"synthetic-btc-short", "instrument":"BTC-USDT-SWAP", "direction":"short",
+      "base_quantity":"1", "entry_price":"110", "opened_at":"2026-01-01T00:00:00Z",
+      "updated_at":"2026-01-01T00:00:00Z", "source":"synthetic", "verified":true,
+      "stop_price":"120", "estimated_trade_cost":"2"
+    },
+    {
+      "id":"synthetic-gold-long", "instrument":"XAU-USDT-SWAP", "direction":"long",
+      "base_quantity":"0.5", "entry_price":"180", "opened_at":"2026-01-01T00:00:00Z",
+      "updated_at":"2026-01-01T00:00:00Z", "source":"synthetic", "verified":true,
+      "stop_price":"160", "estimated_trade_cost":"2"
+    }
+  ],
+  "products": {
+    "BTC-USDT": {"underlying":"BTC","asset_class":"crypto"},
+    "BTC-USDT-SWAP": {"underlying":"BTC","asset_class":"crypto"},
+    "XAUT-USDT": {"underlying":"GOLD","asset_class":"gold_proxy"},
+    "XAU-USDT-SWAP": {"underlying":"GOLD","asset_class":"gold_proxy"}
+  },
+  "quotes": [
+    {"instrument":"BTC-USDT","price":"100","at":"2026-01-02T00:00:00Z","source":"synthetic_not_live"},
+    {"instrument":"BTC-USDT-SWAP","price":"100","at":"2026-01-02T00:00:00Z","source":"synthetic_not_live"},
+    {"instrument":"XAUT-USDT","price":"200","at":"2026-01-02T00:00:00Z","source":"synthetic_not_live"},
+    {"instrument":"XAU-USDT-SWAP","price":"200","at":"2026-01-02T00:00:00Z","source":"synthetic_not_live"}
+  ],
+  "settings": {
+    "long_term_budget":"300", "contract_budget":"100", "reserve_cash_target":"900",
+    "product_weight_limits":{"BTC-USDT":"0.1","BTC-USDT-SWAP":"0.1","XAUT-USDT":"0.5","XAU-USDT-SWAP":"0.1"},
+    "contract_trade_loss_budget":"10", "max_gross_exposure_ratio":"0.4",
+    "max_abs_net_exposure_ratio":"0.2", "min_available_cash_ratio":"0.6", "max_scenario_loss":"30"
+  },
+  "scenarios": [
+    {"name":"synthetic_down","shocks":{"BTC":"-0.1","GOLD":"-0.2"}},
+    {"name":"synthetic_up","shocks":{"BTC":"0.2","GOLD":"0.1"}}
+  ]
+}

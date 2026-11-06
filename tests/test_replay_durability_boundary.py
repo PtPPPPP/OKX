@@ -7,6 +7,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from app.portfolio.ledger_storage import LedgerStore
+from app.portfolio.personal_ledger import Opening
 from app.portfolio.thesis_storage import ThesisStore
 from app.services.continuous_shadow_repository import ContinuousShadowRepository
 from app.storage.database import Database
@@ -125,10 +127,20 @@ def test_synchronous_pragma_is_confined_to_named_connection_owners() -> None:
         if "PRAGMA synchronous" in path.read_text(encoding="utf-8")
     }
     assert files == {
+        Path("app/portfolio/ledger_storage.py"),
         Path("app/portfolio/thesis_storage.py"),
         Path("app/storage/database.py"),
         Path("app/services/vwap_shadow_soak.py"),
     }
+
+
+def test_personal_ledger_writer_always_uses_full_durability(tmp_path: Path) -> None:
+    store = LedgerStore(tmp_path / "personal.db")
+    store.initialize(
+        Opening(as_of=datetime(2026, 1, 1, tzinfo=UTC), source="synthetic", cash=Decimal("0"))
+    )
+    with store._connect(write=True) as connection:
+        assert int(connection.execute("PRAGMA synchronous").fetchone()[0]) == 2
 
 
 def test_thesis_journal_writer_always_uses_full_durability(tmp_path: Path) -> None:
