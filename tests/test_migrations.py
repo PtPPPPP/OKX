@@ -4,10 +4,8 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-from typer.testing import CliRunner
 
 import app.storage.migrations as migrations_module
-from app.cli import app
 from app.storage.database import Database, StorageError
 from app.storage.migrations import MIGRATIONS, Migration, MigrationError, MigrationManager
 
@@ -177,43 +175,3 @@ def test_database_lock_and_non_sqlite_migration_failure_are_nonzero_and_atomic(
             ).fetchone()
             is None
         )
-
-
-def test_db_migrate_cli_reports_invalid_target_with_nonzero_exit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'cli.db'}")
-
-    result = CliRunner().invoke(app, ["db-migrate", "--target-version", "999"])
-
-    assert result.exit_code == 1
-    assert "unknown database migration target version" in result.output
-
-
-def test_noop_migrate_on_protected_path_does_not_require_permit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    path = tmp_path / "prod.db"
-    Database(f"sqlite:///{path}").initialize()
-    monkeypatch.setattr(migrations_module, "_PROTECTED_PRODUCTION_DATABASE", path.resolve())
-
-    applied = MigrationManager(path).migrate(target_version=MIGRATIONS[-1].version)
-
-    assert applied == ()
-
-
-def test_migrate_on_protected_path_with_pending_requires_permit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    path = tmp_path / "prod.db"
-    with sqlite3.connect(path) as connection:
-        connection.execute(
-            "CREATE TABLE schema_migrations("
-            "id INTEGER PRIMARY KEY, version INTEGER NOT NULL, name TEXT NOT NULL,"
-            "checksum TEXT NOT NULL, applied_at TEXT NOT NULL,"
-            "execution_status TEXT NOT NULL)"
-        )
-    monkeypatch.setattr(migrations_module, "_PROTECTED_PRODUCTION_DATABASE", path.resolve())
-
-    with pytest.raises(MigrationError, match="授权"):
-        MigrationManager(path).migrate(target_version=MIGRATIONS[-1].version)

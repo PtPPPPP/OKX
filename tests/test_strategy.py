@@ -12,7 +12,6 @@ from app.domain.position import Portfolio
 from app.domain.signal import SignalAction
 from app.runtime.clock import BacktestClock
 from app.strategies.registry import create_strategy, strategy_descriptions
-from app.strategies.v3_parameters import V3_PARAMETER_MODELS
 from tests.conftest import make_candles
 
 
@@ -37,8 +36,8 @@ def test_registry_exposes_two_replaceable_strategies() -> None:
     assert names == {
         "moving_average_cross",
         "buy_and_hold",
+        "ma_bollinger_pullback",
         "vwap_mean_reversion",
-        *V3_PARAMETER_MODELS,
     }
 
 

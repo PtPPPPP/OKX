@@ -43,7 +43,7 @@ uv run python -m scripts.review_positions --positions data/personal-positions/re
 
 `cost` 是单位平均成本；是否已含买入手续费由输入决定。`quantity` 必须是用户明确登记的实际数量，
 允许零；缺失或 `null` 表示未知。此入口只计算单项持仓的市值和未实现盈亏，不核算现金、
-历史已实现盈亏和账户总估值。此入口不提供完整流水和费用核算。
+历史已实现盈亏和账户总估值。完整流水和费用核算使用 [个人持仓台账](personal-ledger.md)。
 
 旧格式每项只有 `instrument`、`cost`、`market_value_usdt` 时仍可读取。
 旧 `market_value_usdt` 仅保留为 `historical_snapshot`，不是当前市值或买入本金；记录时间缺失时标为未知。

@@ -101,7 +101,6 @@ class OrderRequest:
     mode: str = ""
     bar: str = ""
     order_source: OrderSource = OrderSource.LEGACY
-    strategy_instance_id: str = ""
 
     @property
     def notional(self) -> Decimal:
@@ -123,7 +122,6 @@ class ProposedOrder:
     mode: str = ""
     bar: str = ""
     order_source: OrderSource = OrderSource.LEGACY
-    strategy_instance_id: str = ""
 
     @property
     def notional(self) -> Decimal:
@@ -144,7 +142,6 @@ class ProposedOrder:
             mode=self.mode,
             bar=self.bar,
             order_source=self.order_source,
-            strategy_instance_id=self.strategy_instance_id,
         )
 
 

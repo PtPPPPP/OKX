@@ -27,6 +27,9 @@ tests/test_legacy_inventory_cleanup.py
 coverage.xml
 htmlcov/
 artifacts/
+data/personal-positions/
+data/personal-theses/
+data/personal-risk/
 build/
 dist/
 *.egg-info/
@@ -57,8 +60,3 @@ logs/
 *.swo
 .DS_Store
 Thumbs.db
-
-data/personal-theses/
-data/personal-positions/
-
-data/personal-risk/

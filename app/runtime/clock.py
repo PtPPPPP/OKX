@@ -1,16 +1,11 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Protocol, runtime_checkable
+from typing import Protocol
 
 
 class Clock(Protocol):
     def now(self) -> datetime: ...
-
-
-@runtime_checkable
-class ReplayClock(Clock, Protocol):
-    def advance_to(self, current: datetime) -> None: ...
 
 
 class SystemClock:

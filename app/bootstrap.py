@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
-from contextlib import ExitStack, contextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -35,30 +33,14 @@ from app.runners.demo import (
     StaticPortfolioSource,
 )
 from app.runtime.clock import BacktestClock, SystemClock
-from app.services.demo_proposal_application import DemoProposalApplication
-from app.services.demo_session import DemoTradingSession
 from app.services.private_state_coordinator import PrivateStateCoordinator
 from app.services.reconciliation import ReconciliationStatus
 from app.session import SessionDescriptor, TradingSession
-from app.storage.audit import AuditRepository
 from app.storage.database import Database
 from app.storage.repositories import TradingRepository
 from app.strategies.registry import create_strategy
 from app.trading_engine import ProtectiveExitPolicy, TradingEngine
 from backtest.engine import BacktestEngine
-
-
-@contextmanager
-def open_demo_proposal_application(
-    config: RunConfig, settings: Settings, repository: TradingRepository, client: OkxClient
-) -> Iterator[DemoProposalApplication]:
-    """Take ownership of client, close session then client on every exit path."""
-    with ExitStack() as resources:
-        resources.callback(client.close)
-        session = DemoTradingSession(config, settings, client, repository)
-        resources.callback(session.close)
-        session.start()
-        yield DemoProposalApplication(repository, client, session)
 
 
 def build_backtest_session(config: RunConfig, settings: Settings) -> TradingSession:
@@ -83,12 +65,7 @@ def build_backtest_session(config: RunConfig, settings: Settings) -> TradingSess
         else:
             source_provider = OKXHistoricalDataProvider(client)
         provider = RecordingMarketDataProvider(source_provider)
-        strategy = create_strategy(
-            config.strategy.name,
-            config.strategy.parameters,
-            instrument,
-            implementation_version=config.strategy.implementation_version,
-        )
+        strategy = create_strategy(config.strategy.name, config.strategy.parameters, instrument)
         order_notional = Decimal(str(config.position_sizing.parameters["order_notional"]))
         position_sizer = FixedNotionalPositionSizer(order_notional)
         risk_manager = default_risk_manager(
@@ -265,12 +242,7 @@ def build_demo_evaluation_session(config: RunConfig, settings: Settings) -> Trad
         daily_pnl, drawdown = repository.daily_risk_metrics(
             instrument.instrument_id, sync.captured_at, current_equity
         )
-        strategy = create_strategy(
-            config.strategy.name,
-            config.strategy.parameters,
-            instrument,
-            implementation_version=config.strategy.implementation_version,
-        )
+        strategy = create_strategy(config.strategy.name, config.strategy.parameters, instrument)
         position_sizer = FixedNotionalPositionSizer(
             Decimal(str(config.position_sizing.parameters["order_notional"]))
         )
@@ -284,10 +256,7 @@ def build_demo_evaluation_session(config: RunConfig, settings: Settings) -> Trad
         )
         clock = BacktestClock(confirmed[0].timestamp)
         portfolio_source = StaticPortfolioSource(sync.portfolio)
-        event_bus = EventBus(
-            AuditRepository(database, event_mode=config.mode.value, event_bar=config.market.bar),
-            retention_limit=256,
-        )
+        event_bus = EventBus(repository)
         engine = TradingEngine(
             run_id=run_id,
             mode=TradingMode.DEMO,
@@ -353,12 +322,7 @@ def build_public_observe_session(
         database.initialize()
         repository = TradingRepository(database)
         run_id = uuid4().hex
-        strategy = create_strategy(
-            config.strategy.name,
-            config.strategy.parameters,
-            instrument,
-            implementation_version=config.strategy.implementation_version,
-        )
+        strategy = create_strategy(config.strategy.name, config.strategy.parameters, instrument)
         clock = BacktestClock(datetime.now(UTC))
         portfolio_source = StaticPortfolioSource(
             PortfolioSnapshot(
@@ -370,10 +334,7 @@ def build_public_observe_session(
                 average_entry_prices={},
             )
         )
-        event_bus = EventBus(
-            AuditRepository(database, event_mode=config.mode.value, event_bar=config.market.bar),
-            retention_limit=256,
-        )
+        event_bus = EventBus(repository)
         websocket_provider = OKXPublicWebSocketProvider(
             gap_provider=OKXHistoricalDataProvider(client),
             stale_after_seconds=config.risk.stale_after_seconds,

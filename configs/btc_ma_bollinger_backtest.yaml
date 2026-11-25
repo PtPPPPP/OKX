@@ -1,0 +1,56 @@
+mode: backtest
+
+exchange:
+  name: okx
+  simulated: true
+
+market:
+  instrument_id: BTC-USDT
+  instrument_type: spot
+  bar: 1h
+
+strategy:
+  name: ma_bollinger_pullback
+  parameters:
+    trend_ma_period: 50
+    trend_ma_type: sma
+    bollinger_period: 20
+    bollinger_std_dev: 2.0
+    min_bandwidth_pct: 0.005
+    require_trend_rising: true
+    exit_band: middle
+    exit_on_trend_break: true
+    stop_loss_pct: 0.02
+    max_hold_bars: 48
+
+position_sizing:
+  name: fixed_notional
+  parameters:
+    order_notional: 100
+
+risk:
+  max_order_notional: 100
+  max_total_exposure: 200
+  max_daily_loss: 20
+  max_drawdown_pct: 5
+  max_orders_per_minute: 2
+  stale_after_seconds: 3600
+
+protective_exits:
+  enabled: false
+
+backtest:
+  initial_capital: 10000
+  fee_rate: 0.001
+  slippage_rate: 0.0005
+  seed: 0
+
+data:
+  source: csv
+  path: tests/fixtures/vwap/btc_usdt_1h_600.csv
+  limit: 1000
+  output: data/btc_usdt_1h.csv
+  instrument_snapshot: configs/snapshots/BTC-USDT.json
+
+output:
+  directory: data/results/btc_ma_bollinger

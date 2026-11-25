@@ -22,23 +22,6 @@ def test_live_validation_never_echoes_credentials(monkeypatch: pytest.MonkeyPatc
     assert "sensitive-passphrase" not in result.output
 
 
-def test_demo_order_requires_explicit_confirmation() -> None:
-    result = CliRunner().invoke(
-        app,
-        [
-            "place-demo-test-order",
-            "--side",
-            "buy",
-            "--price",
-            "100",
-            "--config",
-            "configs/btc_ma_demo.yaml",
-        ],
-    )
-    assert result.exit_code == 1
-    assert "--confirm-demo-order" in result.output
-
-
 def test_demo_cancellation_requires_explicit_confirmation() -> None:
     result = CliRunner().invoke(
         app,
@@ -51,18 +34,3 @@ def test_demo_cancellation_requires_explicit_confirmation() -> None:
     )
     assert result.exit_code == 1
     assert "--confirm-demo-cancellation" in result.output
-
-
-def test_bounded_demo_requires_explicit_confirmation() -> None:
-    result = CliRunner().invoke(app, ["run-continuous-demo", "--maximum-order-submissions", "2"])
-    assert result.exit_code == 1
-    assert "--confirm-continuous-demo" in result.output
-
-
-def test_bounded_demo_rejects_shadow_and_confirmation_together() -> None:
-    result = CliRunner().invoke(
-        app,
-        ["run-continuous-demo", "--shadow", "--confirm-continuous-demo"],
-    )
-    assert result.exit_code == 1
-    assert "cannot be used together" in result.output

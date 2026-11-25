@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import csv
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from itertools import pairwise
 from pathlib import Path
 
-from app.domain.market import Candle, validate_confirmed_bar
+from app.domain.market import Candle
 
 
 class MarketDataError(ValueError):
@@ -104,7 +105,7 @@ def save_candles_csv(candles: Iterable[Candle], path: Path) -> None:
             )
 
 
-def load_candles_csv(path: Path, *, bar: str, strict: bool = False) -> list[Candle]:
+def load_candles_csv(path: Path, *, bar: str) -> list[Candle]:
     if not path.is_file():
         raise MarketDataError(f"K 线文件不存在: {path}")
     candles: list[Candle] = []
@@ -115,10 +116,9 @@ def load_candles_csv(path: Path, *, bar: str, strict: bool = False) -> list[Cand
             if not reader.fieldnames or not required.issubset(reader.fieldnames):
                 raise MarketDataError("CSV 缺少必要列")
             for row in reader:
-                timestamp = datetime.fromisoformat(row["timestamp"])
                 candles.append(
                     Candle(
-                        timestamp=timestamp if strict else timestamp.astimezone(UTC),
+                        timestamp=datetime.fromisoformat(row["timestamp"]).astimezone(UTC),
                         open=Decimal(row["open"]),
                         high=Decimal(row["high"]),
                         low=Decimal(row["low"]),
@@ -131,15 +131,6 @@ def load_candles_csv(path: Path, *, bar: str, strict: bool = False) -> list[Cand
         if isinstance(exc, MarketDataError):
             raise
         raise MarketDataError(f"CSV K 线格式错误: {exc}") from exc
-    if strict:
-        interval = BAR_INTERVALS.get(bar.lower())
-        if interval is None:
-            raise MarketDataError(f"不支持的 K 线周期: {bar}")
-        previous: Candle | None = None
-        for candle in candles:
-            validate_confirmed_bar(candle, previous, interval=interval)
-            previous = candle
-        return candles
     return normalize_candles(candles, bar=bar)
 
 
@@ -150,3 +141,51 @@ def okx_bar(bar: str) -> str:
     if normalized.endswith("h") or normalized.endswith("d"):
         return normalized[:-1] + normalized[-1].upper()
     return normalized
+
+
+@dataclass(frozen=True, slots=True)
+class HigherTimeframeCandle:
+    timeframe: str
+    open_time: datetime
+    close_time: datetime
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal
+    source_bar_count: int
+
+
+def aggregate_completed(candles: list[Candle], *, hours: int) -> tuple[HigherTimeframeCandle, ...]:
+    if hours not in {4, 24}:
+        raise ValueError("supported higher timeframes are 4H and 1D")
+    one_hour = timedelta(hours=1)
+    buckets: dict[datetime, list[Candle]] = {}
+    for candle in candles:
+        stamp = candle.timestamp.astimezone(UTC)
+        bucket_hour = stamp.hour - stamp.hour % hours if hours < 24 else 0
+        start = stamp.replace(hour=bucket_hour, minute=0, second=0, microsecond=0)
+        buckets.setdefault(start, []).append(candle)
+    result: list[HigherTimeframeCandle] = []
+    for start, items in sorted(buckets.items()):
+        items.sort(key=lambda item: item.timestamp)
+        if len(items) != hours or any(
+            later.timestamp - earlier.timestamp != one_hour for earlier, later in pairwise(items)
+        ):
+            continue
+        if items[0].timestamp.astimezone(UTC) != start:
+            continue
+        result.append(
+            HigherTimeframeCandle(
+                timeframe=f"{hours}H" if hours < 24 else "1D",
+                open_time=start,
+                close_time=start + timedelta(hours=hours),
+                open=items[0].open,
+                high=max(item.high for item in items),
+                low=min(item.low for item in items),
+                close=items[-1].close,
+                volume=sum((item.volume for item in items), Decimal("0")),
+                source_bar_count=hours,
+            )
+        )
+    return tuple(result)

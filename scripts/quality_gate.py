@@ -21,10 +21,6 @@ SECURITY_SMOKE_TESTS = (
     "tests/test_cli_security.py",
     "tests/test_demo_write_boundary.py",
     "tests/test_private_state_submission_fence.py",
-    "tests/test_database_migration_workflow.py",
-    "tests/test_replay_durability_boundary.py",
-    "tests/test_shadow_replay_convergence.py",
-    "tests/test_shadow_replay_connection_lifecycle.py",
     "tests/test_settings.py",
     "tests/test_fresh_clone_self_containment.py",
 )

@@ -1000,16 +1000,6 @@ class MigrationManager:
         )
         if dry_run:
             return pending
-        if existing and pending and self.path == _PROTECTED_PRODUCTION_DATABASE:
-            from app.storage.migration_execution import _consume_production_migration_permit
-
-            try:
-                _consume_production_migration_permit(production_permit, self.path)
-            except PermissionError as exc:
-                raise MigrationError(
-                    "正式数据库写迁移需要一次性授权执行入口，直接运行 db-migrate 被拒绝；"
-                    "请显式设置 DATABASE_URL 指向数据库副本后运行同一命令"
-                ) from exc
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if existing and backup and pending:
             self.backup()

@@ -12,8 +12,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.domain.market import Candle
-from app.market.historical_data import normalize_candles
-from app.strategies.v3_timeframes import aggregate_completed
+from app.market.historical_data import aggregate_completed, normalize_candles
 
 HOUR = timedelta(hours=1)
 ZERO = Decimal("0")

@@ -40,20 +40,10 @@ EQUITY_FIELDS = [
 
 def write_backtest_report(result: BacktestResult, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    scoped = any(fill.strategy_instance_id for fill in result.fills)
-    trade_fields = [*TRADE_FIELDS, "strategy_instance_id"] if scoped else TRADE_FIELDS
-    closed_fields = [
-        name
-        for name in ClosedTrade.__dataclass_fields__
-        if scoped or name != "strategy_instance_id"
-    ]
     _write_csv(
         output_dir / "backtest_trades.csv",
-        [
-            {name: value for name, value in asdict(fill).items() if name in trade_fields}
-            for fill in result.fills
-        ],
-        trade_fields,
+        [asdict(fill) for fill in result.fills],
+        TRADE_FIELDS,
     )
     _write_csv(
         output_dir / "equity_curve.csv",
@@ -62,11 +52,8 @@ def write_backtest_report(result: BacktestResult, output_dir: Path) -> None:
     )
     _write_csv(
         output_dir / "closed_trades.csv",
-        [
-            {name: value for name, value in asdict(trade).items() if name in closed_fields}
-            for trade in result.closed_trades
-        ],
-        closed_fields,
+        [asdict(trade) for trade in result.closed_trades],
+        list(ClosedTrade.__dataclass_fields__),
     )
     with (output_dir / "backtest_summary.json").open("w", encoding="utf-8") as file:
         json.dump(result.summary, file, ensure_ascii=False, indent=2, default=str)
