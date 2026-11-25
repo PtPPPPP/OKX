@@ -64,6 +64,36 @@ def render_report(report: dict[str, Any]) -> str:
                 f"| {item['instrument']} | READY | {trend_names[item['trend_4h']]} | "
                 f"{item['close']} | {item['return_24h_pct']:.2f} | {item['atr_pct']:.2f} | {item['plan']['status']} |"
             )
+    if any(
+        item.get("status") == "READY" and "ma_bollinger" in item for item in report["instruments"]
+    ):
+        lines += [
+            "",
+            "## 均线 + 布林带 + ATR 量化模型面板（EMA200 + BB48 + 3×ATR24）",
+            "",
+            "| 产品 | 收盘价 | EMA200 | 布林下轨 / 中轨 / 上轨 | %B 分位 | 带宽% | 距下轨% | 保护止损位 (止损%) | 每1万U以损定仓(1%风险) | 量化状态 |",
+            "|---|---:|---:|---|---:|---:|---:|---:|---:|---|",
+        ]
+        for item in report["instruments"]:
+            if item.get("status") != "READY" or "ma_bollinger" not in item:
+                lines.append(f"| {item['instrument']} | — | — | — | — | — | — | — | — | 不可用 |")
+                continue
+            mb = item["ma_bollinger"]
+            bands_str = (
+                f"{display_number(mb['bb_lower'])} / "
+                f"{display_number(mb['bb_middle'])} / "
+                f"{display_number(mb['bb_upper'])}"
+            )
+            stop_str = (
+                f"{display_number(mb['protective_stop_price'])} ({mb['stop_distance_pct']:.2f}%)"
+            )
+            lines.append(
+                f"| {item['instrument']} | {display_number(item['close'])} | "
+                f"{display_number(mb['trend_ma'])} | {bands_str} | "
+                f"{mb['percent_b']:.2f} | {mb['bandwidth_pct']:.2f}% | "
+                f"{mb['distance_to_lower_pct']:+.2f}% | {stop_str} | "
+                f"{mb['risk_sizing_notional_per_10k_usdt']:.0f} U | {mb['signal_zone_label']} |"
+            )
     lines += [
         "",
         "## 技术观察与合约短线基线",

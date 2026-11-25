@@ -16,7 +16,11 @@ from uuid import uuid4
 
 import numpy as np
 
-from app.daily_reference import ReferenceConfig, calculate_features
+from app.daily_reference import (
+    ReferenceConfig,
+    calculate_features,
+    calculate_ma_bollinger_snapshot,
+)
 from app.domain.market import Candle
 from app.market.daily_public import DailyPublicClient
 from app.market.historical_data import save_candles_csv
@@ -223,6 +227,7 @@ def summarize(
         "relative_volume": float(f.relative_volume) if f.relative_volume is not None else None,
         "hourly_signal": "LONG" if f.direction == 1 else "WAIT",
         "hourly_signal_scope": "technical_observation_only; not a long-term holding decision",
+        "ma_bollinger": calculate_ma_bollinger_snapshot(hourly),
         "context": context,
     }
 
@@ -276,6 +281,22 @@ def render(report: dict[str, Any]) -> str:
             f"- 最近 20 个完整日高/低：{item['daily_20_high']} / {item['daily_20_low']}。",
             f"- 前 24 个完整小时高/低：{item['prior_24h_high']} / {item['prior_24h_low']}；小时 ATR：{display_number(item['atr_1h'])}。",
             f"- 小时形态（仅观察）：{item['hourly_signal']}；4H 趋势：{item['trend_4h']}；相对量：{item['relative_volume']}。",
+            *(
+                [
+                    f"- 均线+布林带量化观察（EMA{item['ma_bollinger']['trend_ma_period']} + BB{item['ma_bollinger']['bollinger_period']}）："
+                    f"EMA={display_number(item['ma_bollinger']['trend_ma'])}；"
+                    f"下/中/上轨={display_number(item['ma_bollinger']['bb_lower'])} / "
+                    f"{display_number(item['ma_bollinger']['bb_middle'])} / "
+                    f"{display_number(item['ma_bollinger']['bb_upper'])}；"
+                    f"%B={item['ma_bollinger']['percent_b']:.2f}；"
+                    f"带宽={item['ma_bollinger']['bandwidth_pct']:.2f}%；"
+                    f"保护止损参考={display_number(item['ma_bollinger']['protective_stop_price'])} "
+                    f"({item['ma_bollinger']['stop_distance_pct']:.2f}%)；"
+                    f"状态={item['ma_bollinger']['signal_zone_label']}。"
+                ]
+                if "ma_bollinger" in item
+                else []
+            ),
             f"- 历史不重叠三日收益样本 {hist['sample_count']} 个；5%/中位/95% 分位：{hist['q05_pct']:.2f}% / {hist['median_pct']:.2f}% / {hist['q95_pct']:.2f}%。",
             "- 上述历史分位数是过去收益描述，不能作为未来三天的预测概率或置信区间。",
             f"- 实际数量：{item['quantity'] if item['quantity'] is not None else '未知'}；估值状态：{item['valuation_status']}。",

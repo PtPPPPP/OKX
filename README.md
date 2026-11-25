@@ -117,7 +117,16 @@ uv run python -m app.cli cancel-demo-order <CLIENT_ORDER_ID> --config configs/bt
 
 ## 个人投研与风险管理工具
 
-- **每日交易参考日报**：运行 `.\scripts\run_daily_reference.ps1`，说明见 [docs/daily-reference-model.md](docs/daily-reference-model.md)。
+- **一键投研与量化风控驾驶舱（新增）**：
+  - 在线拉取 OKX 公共行情一键整合「台账估值 + 投资逻辑 + 组合风控 + 均线布林带 ATR 信号与以损定仓面板」：
+    ```powershell
+    uv run python -m scripts.personal_cockpit --fetch-public
+    ```
+  - 离线结合本地台账、投资逻辑库与本地 K 线生成全景 Markdown 简报：
+    ```powershell
+    uv run python -m scripts.personal_cockpit --ledger data/personal-positions/ledger.db --thesis-db data/personal-theses/theses.db --candles-dir data/candles
+    ```
+- **每日交易参考日报**（已融合 `EMA200 + BB48 + 3×ATR24` 与以损定仓量化面板）：运行 `.\scripts\run_daily_reference.ps1`，说明见 [docs/daily-reference-model.md](docs/daily-reference-model.md)。
 - **长周期持仓分析**：`uv run python -m scripts.review_positions`，说明见 [docs/position-review.md](docs/position-review.md)。
 - **本地个人持仓台账**：`uv run python -m scripts.personal_ledger`，说明见 [docs/personal-ledger.md](docs/personal-ledger.md)。
 - **现货逻辑登记与复核**：`uv run python -m scripts.spot_thesis`，说明见 [docs/spot-thesis.md](docs/spot-thesis.md) 与 [docs/personal-trading-policy.md](docs/personal-trading-policy.md)。

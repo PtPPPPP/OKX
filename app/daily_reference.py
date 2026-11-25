@@ -110,6 +110,114 @@ def calculate_features(candles: list[Candle], cfg: ReferenceConfig, *, short: bo
     )
 
 
+def calculate_ma_bollinger_snapshot(
+    candles: list[Candle],
+    *,
+    trend_ma_period: int = 200,
+    trend_tolerance_pct: Decimal = Decimal("0.03"),
+    bollinger_period: int = 48,
+    bollinger_std_dev: Decimal = Decimal("2.0"),
+    min_bandwidth_pct: Decimal = Decimal("0.035"),
+    atr_period: int = 24,
+    atr_stop_multiplier: Decimal = Decimal("3.0"),
+    reference_equity_usdt: Decimal = Decimal("10000"),
+    risk_pct: Decimal = Decimal("0.01"),
+    max_notional_pct: Decimal = Decimal("0.30"),
+) -> dict[str, Any]:
+    """Compute causal EMA200 + BB(48, 2.0) + 3xATR24 and risk-based sizing reference."""
+    effective_trend_period = min(trend_ma_period, max(20, len(candles) - 1))
+    effective_bb_period = min(bollinger_period, len(candles))
+    effective_atr_period = min(atr_period, max(2, len(candles) - 1))
+
+    closes = [c.close for c in candles]
+    last_close = closes[-1]
+
+    # EMA trend calculation seeded with initial SMA
+    alpha = Decimal("2") / Decimal(effective_trend_period + 1)
+    ema = sum(closes[:effective_trend_period], ZERO) / Decimal(effective_trend_period)
+    prev_ema = ema
+    for price in closes[effective_trend_period:]:
+        prev_ema = ema
+        ema = price * alpha + ema * (Decimal("1") - alpha)
+    trend_rising = ema >= prev_ema
+    trend_floor = ema * (Decimal("1") - trend_tolerance_pct)
+    trend_ok = last_close >= trend_floor and trend_rising
+
+    # Bollinger Bands
+    bb_window = closes[-effective_bb_period:]
+    bb_middle = sum(bb_window, ZERO) / Decimal(effective_bb_period)
+    variance = sum(((p - bb_middle) ** 2 for p in bb_window), ZERO) / Decimal(effective_bb_period)
+    std_dev = variance.sqrt()
+    bb_upper = bb_middle + bollinger_std_dev * std_dev
+    bb_lower = bb_middle - bollinger_std_dev * std_dev
+    band_span = bb_upper - bb_lower
+    bandwidth = band_span / bb_middle if bb_middle > 0 else ZERO
+    percent_b = (last_close - bb_lower) / band_span if band_span > 0 else Decimal("0.5")
+    distance_to_lower_pct = (
+        (last_close - bb_lower) / bb_lower * Decimal("100") if bb_lower > 0 else ZERO
+    )
+
+    # ATR and stop-distance reference
+    atr_ranges = [
+        max(c.high - c.low, abs(c.high - p.close), abs(c.low - p.close))
+        for p, c in zip(
+            candles[-effective_atr_period - 1 : -1],
+            candles[-effective_atr_period:],
+            strict=True,
+        )
+    ]
+    atr_val = sum(atr_ranges, ZERO) / Decimal(effective_atr_period)
+    fixed_stop = last_close * (Decimal("1") - Decimal("0.045"))
+    atr_stop = last_close - atr_val * atr_stop_multiplier
+    stop_price = max(fixed_stop, atr_stop)
+    stop_distance = (
+        (last_close - stop_price) / last_close if last_close > stop_price > 0 else Decimal("0.045")
+    )
+
+    # Risk-per-trade notional reference (per 10,000 USDT equity)
+    raw_notional = (reference_equity_usdt * risk_pct) / stop_distance
+    suggested_notional = min(raw_notional, reference_equity_usdt * max_notional_pct)
+
+    if trend_ok and bandwidth >= min_bandwidth_pct and last_close <= bb_lower:
+        zone = "PULLBACK_BUY_ZONE"
+        zone_label = "顺势下轨低吸区"
+    elif last_close >= bb_upper:
+        zone = "UPPER_BAND_EXTENSION"
+        zone_label = "触及上轨超买区"
+    elif trend_ok and last_close >= bb_middle:
+        zone = "UPTREND_ABOVE_MID"
+        zone_label = "上升趋势中轨上方"
+    elif trend_ok:
+        zone = "UPTREND_PULLBACK_WAIT"
+        zone_label = "上升趋势回踩观察"
+    else:
+        zone = "BELOW_TREND_WAIT"
+        zone_label = "趋势均线下方观望"
+
+    return {
+        "trend_ma_type": "ema",
+        "trend_ma_period": effective_trend_period,
+        "trend_ma": str(ema),
+        "trend_floor": str(trend_floor),
+        "trend_rising": trend_rising,
+        "bollinger_period": effective_bb_period,
+        "bollinger_std_dev": str(bollinger_std_dev),
+        "bb_upper": str(bb_upper),
+        "bb_middle": str(bb_middle),
+        "bb_lower": str(bb_lower),
+        "bandwidth_pct": float(bandwidth * Decimal("100")),
+        "percent_b": float(percent_b),
+        "distance_to_lower_pct": float(distance_to_lower_pct),
+        "atr_period": effective_atr_period,
+        "atr": str(atr_val),
+        "protective_stop_price": str(stop_price),
+        "stop_distance_pct": float(stop_distance * Decimal("100")),
+        "risk_sizing_notional_per_10k_usdt": float(suggested_notional.quantize(Decimal("0.01"))),
+        "signal_zone": zone,
+        "signal_zone_label": zone_label,
+    }
+
+
 def levels(feature: Features, cfg: ReferenceConfig, tick: Decimal) -> tuple[Decimal, Decimal]:
     if not tick.is_finite() or tick <= 0 or feature.direction not in {-1, 1}:
         raise ValueError("valid tick and triggered direction required")
@@ -269,6 +377,7 @@ def analyze(
         "relative_volume": float(f.relative_volume) if f.relative_volume is not None else None,
         "holding_policy": "thesis_hold" if long_term_spot else "tactical_research",
         "max_holding_hours": None if long_term_spot else cfg.max_holding_hours,
+        "ma_bollinger": calculate_ma_bollinger_snapshot(candles),
         "plan": plan,
         "prediction": {"status": "NOT_VALIDATED", "up_probability": None, "price_interval": None},
         "replay": {
