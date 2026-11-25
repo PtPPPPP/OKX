@@ -13,6 +13,11 @@ from app.domain.market import Candle, Instrument
 from app.domain.order import Order, OrderRequest, OrderSide, OrderState, OrderType
 from app.domain.position import Portfolio
 from app.domain.signal import SignalAction
+from app.position_sizing.fixed_notional import (
+    PercentEquityPositionSizer,
+    RiskPerTradePositionSizer,
+    create_position_sizer,
+)
 from app.runtime.clock import BacktestClock
 from app.strategies.ma_bollinger import MABollingerParameters, MABollingerPullbackStrategy
 from app.strategies.registry import create_strategy
@@ -306,3 +311,75 @@ def test_ema_mode_and_active_order_guard(eth_instrument: Instrument) -> None:
     assert sig.action is SignalAction.HOLD
     assert "活动订单" in sig.reason
     assert strategy.protective_exit_levels(Decimal("100")).stop_price == Decimal("98.00")
+
+
+def test_confirm_rebound_and_atr_stop_distance(btc_instrument: Instrument) -> None:
+    strategy = MABollingerPullbackStrategy(
+        MABollingerParameters(
+            trend_ma_period=5,
+            bollinger_period=4,
+            bollinger_std_dev=Decimal("1.2"),
+            min_bandwidth_pct=Decimal("0.001"),
+            trend_tolerance_pct=Decimal("0.05"),
+            require_trend_rising=False,
+            confirm_rebound=True,
+            atr_period=3,
+            atr_stop_multiplier=Decimal("1.5"),
+            stop_loss_pct=Decimal("0.10"),
+        )
+    )
+    raw = make_candles(["100", "105", "110", "115", "120", "108", "113"])
+    # Make bar 5 a bearish dip below lower band, and bar 6 a bullish rebound candle (close > open).
+    candles = list(raw)
+    candles[5] = replace(
+        candles[5],
+        open=Decimal("114"),
+        high=Decimal("115"),
+        low=Decimal("107"),
+        close=Decimal("108"),
+    )
+    candles[6] = replace(
+        candles[6],
+        open=Decimal("108"),
+        high=Decimal("114"),
+        low=Decimal("108"),
+        close=Decimal("113"),
+    )
+    strategy.on_start(_make_context(btc_instrument, candles[0]))
+    signals = [strategy.on_bar(_make_context(btc_instrument, c), c)[0] for c in candles]
+    # Bar 5 (the dip itself) must HOLD because confirm_rebound waits for a bullish rebound bar.
+    assert signals[5].action is SignalAction.HOLD
+    assert signals[6].action is SignalAction.BUY
+    assert "atr" in signals[6].metadata
+    assert "stop_distance_pct" in signals[6].metadata
+    assert Decimal(signals[6].metadata["stop_distance_pct"]) > Decimal("0")
+
+
+def test_percent_equity_and_risk_per_trade_position_sizers(btc_instrument: Instrument) -> None:
+    candle = make_candles(["100"])[0]
+    ctx = _make_context(btc_instrument, candle)
+    buy_sig = MABollingerPullbackStrategy(MABollingerParameters())._signal(
+        ctx,
+        candle,
+        SignalAction.BUY,
+        "test",
+    )
+    buy_sig.metadata["stop_distance_pct"] = "0.02"
+
+    pct_sizer = create_position_sizer("percent_equity", {"equity_pct": "0.15"})
+    assert isinstance(pct_sizer, PercentEquityPositionSizer)
+    pct_decision = pct_sizer.calculate(
+        buy_sig, ctx.portfolio_snapshot, ctx.market_snapshot, btc_instrument
+    )
+    assert pct_decision.notional == Decimal("1500.00")
+
+    risk_sizer = create_position_sizer(
+        "risk_per_trade",
+        {"risk_pct": "0.005", "default_stop_pct": "0.02", "max_notional_pct": "0.30"},
+    )
+    assert isinstance(risk_sizer, RiskPerTradePositionSizer)
+    # Equity = 10000, risk_pct = 0.5% (50 USDT), stop_distance = 2% -> target notional = 2500 USDT
+    risk_decision = risk_sizer.calculate(
+        buy_sig, ctx.portfolio_snapshot, ctx.market_snapshot, btc_instrument
+    )
+    assert risk_decision.notional == Decimal("2500.00")

@@ -64,7 +64,7 @@ class StrategyConfig(StrictModel):
 
 
 class PositionSizingConfig(StrictModel):
-    name: Literal["fixed_notional"] = "fixed_notional"
+    name: Literal["fixed_notional", "percent_equity", "risk_per_trade"] = "fixed_notional"
     parameters: dict[str, Any] = Field(default_factory=lambda: {"order_notional": Decimal("20")})
 
 
@@ -205,13 +205,9 @@ def load_run_config(
 
 
 def validate_position_sizing(config: PositionSizingConfig) -> None:
-    allowed = {"order_notional"}
-    unknown = set(config.parameters) - allowed
-    if unknown:
-        raise ValueError(f"fixed_notional 不支持参数: {', '.join(sorted(unknown))}")
-    value = Decimal(str(config.parameters.get("order_notional", "0")))
-    if not value.is_finite() or value <= 0:
-        raise ValueError("order_notional 必须大于 0")
+    from app.position_sizing.fixed_notional import validate_position_sizing_parameters
+
+    validate_position_sizing_parameters(config.name, config.parameters)
 
 
 def _set_nested(target: dict[str, Any], path: tuple[str, ...], value: Any) -> None:

@@ -12,27 +12,33 @@ market:
 strategy:
   name: ma_bollinger_pullback
   parameters:
-    trend_ma_period: 50
-    trend_ma_type: sma
-    bollinger_period: 20
+    trend_ma_period: 200
+    trend_ma_type: ema
+    trend_tolerance_pct: 0.03
+    bollinger_period: 48
     bollinger_std_dev: 2.0
-    min_bandwidth_pct: 0.005
+    min_bandwidth_pct: 0.035
     require_trend_rising: true
+    confirm_rebound: false
     exit_band: middle
-    exit_on_trend_break: true
-    stop_loss_pct: 0.02
-    max_hold_bars: 48
+    exit_on_trend_break: false
+    stop_loss_pct: 0.045
+    atr_period: 24
+    atr_stop_multiplier: 3.0
+    max_hold_bars: 96
 
 position_sizing:
-  name: fixed_notional
+  name: risk_per_trade
   parameters:
-    order_notional: 100
+    risk_pct: 0.01
+    default_stop_pct: 0.045
+    max_notional_pct: 0.30
 
 risk:
-  max_order_notional: 100
-  max_total_exposure: 200
-  max_daily_loss: 20
-  max_drawdown_pct: 5
+  max_order_notional: 3500
+  max_total_exposure: 4000
+  max_daily_loss: 500
+  max_drawdown_pct: 20
   max_orders_per_minute: 2
   stale_after_seconds: 3600
 
@@ -47,6 +53,9 @@ backtest:
 
 data:
   source: csv
+  # 默认指向仓库内置 fixture 以便干净 clone 开箱即跑；
+  # 3年样本内回测可改为: data/research/rebuilt_v1/historical/normalized/candles.csv
+  # 样本外(OOS)回测可改为: data/research/rebuilt_v1/historical_oos/normalized/candles.csv
   path: tests/fixtures/vwap/btc_usdt_1h_600.csv
   limit: 1000
   output: data/btc_usdt_1h.csv

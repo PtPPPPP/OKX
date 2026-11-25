@@ -18,7 +18,7 @@ from app.market.providers import (
     OKXHistoricalDataProvider,
 )
 from app.market.websocket import OKXPublicWebSocketProvider
-from app.position_sizing.fixed_notional import FixedNotionalPositionSizer
+from app.position_sizing.fixed_notional import create_position_sizer
 from app.reproducibility import (
     InstrumentSnapshotStore,
     RecordingMarketDataProvider,
@@ -66,8 +66,9 @@ def build_backtest_session(config: RunConfig, settings: Settings) -> TradingSess
             source_provider = OKXHistoricalDataProvider(client)
         provider = RecordingMarketDataProvider(source_provider)
         strategy = create_strategy(config.strategy.name, config.strategy.parameters, instrument)
-        order_notional = Decimal(str(config.position_sizing.parameters["order_notional"]))
-        position_sizer = FixedNotionalPositionSizer(order_notional)
+        position_sizer = create_position_sizer(
+            config.position_sizing.name, config.position_sizing.parameters
+        )
         risk_manager = default_risk_manager(
             maximum_order_notional=config.risk.max_order_notional,
             maximum_exposure=config.risk.max_total_exposure,
@@ -243,8 +244,8 @@ def build_demo_evaluation_session(config: RunConfig, settings: Settings) -> Trad
             instrument.instrument_id, sync.captured_at, current_equity
         )
         strategy = create_strategy(config.strategy.name, config.strategy.parameters, instrument)
-        position_sizer = FixedNotionalPositionSizer(
-            Decimal(str(config.position_sizing.parameters["order_notional"]))
+        position_sizer = create_position_sizer(
+            config.position_sizing.name, config.position_sizing.parameters
         )
         risk_manager = default_risk_manager(
             maximum_order_notional=config.risk.max_order_notional,
@@ -345,8 +346,8 @@ def build_public_observe_session(
             bar=config.market.bar,
             instrument=instrument,
             strategy=strategy,
-            position_sizer=FixedNotionalPositionSizer(
-                Decimal(str(config.position_sizing.parameters["order_notional"]))
+            position_sizer=create_position_sizer(
+                config.position_sizing.name, config.position_sizing.parameters
             ),
             risk_manager=default_risk_manager(
                 maximum_order_notional=config.risk.max_order_notional,

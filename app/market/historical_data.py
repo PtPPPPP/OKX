@@ -112,8 +112,14 @@ def load_candles_csv(path: Path, *, bar: str) -> list[Candle]:
     try:
         with path.open(newline="", encoding="utf-8") as file:
             reader = csv.DictReader(file)
-            required = {"timestamp", "open", "high", "low", "close", "volume", "confirmed"}
-            if not reader.fieldnames or not required.issubset(reader.fieldnames):
+            required = {"timestamp", "open", "high", "low", "close", "volume"}
+            fieldnames = set(reader.fieldnames or ())
+            confirm_col = (
+                "confirmed"
+                if "confirmed" in fieldnames
+                else ("confirm" if "confirm" in fieldnames else None)
+            )
+            if not required.issubset(fieldnames) or confirm_col is None:
                 raise MarketDataError("CSV 缺少必要列")
             for row in reader:
                 candles.append(
@@ -124,7 +130,7 @@ def load_candles_csv(path: Path, *, bar: str) -> list[Candle]:
                         low=Decimal(row["low"]),
                         close=Decimal(row["close"]),
                         volume=Decimal(row["volume"]),
-                        confirmed=row["confirmed"].strip().lower() in {"1", "true", "yes"},
+                        confirmed=row[confirm_col].strip().lower() in {"1", "true", "yes"},
                     )
                 )
     except (KeyError, InvalidOperation, ValueError) as exc:
