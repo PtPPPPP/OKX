@@ -5,7 +5,7 @@ from typing import Protocol
 
 from app.domain.environment import TradingEnvironment
 from app.domain.market import InstrumentType, TradeMode
-from app.domain.order import Order, OrderRequest, OrderState, OrderType
+from app.domain.order import ApprovedOrder, Order, OrderRequest, OrderState, OrderType
 from app.exchange.exceptions import NetworkError, OrderStateUnknown
 from app.execution.demo_write_authorization import (
     MAXIMUM_DEMO_NOTIONAL,
@@ -115,6 +115,34 @@ class ControlledDemoWriteService:
         self.repository.save_order(controlled)
         return controlled
 
+    def submit_approved_order(
+        self,
+        approved: ApprovedOrder,
+        *,
+        private_state_version: int = 1,
+    ) -> Order:
+        request = approved.proposed.to_request()
+        local_order = Order(request=request)
+        self.repository.save_order(local_order)
+        authorization = _issue_demo_write_authorization(
+            operation=DemoWriteOperation.PLACE,
+            proposal_id=request.signal_id,
+            request=request,
+            instrument_type=InstrumentType.SPOT,
+            trade_mode=TradeMode.CASH,
+            private_state_version=private_state_version,
+            environment=TradingEnvironment.DEMO,
+        )
+        try:
+            remote_order = self.client.place_order(request, authorization=authorization)
+        except NetworkError:
+            local_order.transition(OrderState.SUBMITTED, at=approved.approved_at)
+            local_order.transition(OrderState.UNKNOWN, at=approved.approved_at)
+            self.repository.save_order(local_order)
+            raise
+        self.repository.save_order(remote_order)
+        return remote_order
+
     def _validate_linkage(self, order: Order, proposal: DemoOrderProposal) -> None:
         request = order.request
         if (
@@ -130,3 +158,41 @@ class ControlledDemoWriteService:
             or proposal.approved_notional > MAXIMUM_DEMO_NOTIONAL
         ):
             raise PermissionError("controlled Demo Proposal and order do not match")
+
+
+class ControlledDemoExecutionBroker:
+    """Minimal Broker adapter routing TradingEngine Demo orders through ControlledDemoWriteService."""
+
+    def __init__(
+        self,
+        service: ControlledDemoWriteService,
+        open_orders: tuple[Order, ...] = (),
+        *,
+        private_state_version: int = 1,
+    ) -> None:
+        self.service = service
+        self._open_orders = list(open_orders)
+        self.private_state_version = private_state_version
+
+    def submit_order(self, order: ApprovedOrder) -> Order:
+        placed = self.service.submit_approved_order(
+            order,
+            private_state_version=self.private_state_version,
+        )
+        if placed.is_open:
+            self._open_orders.append(placed)
+        return placed
+
+    def cancel_order(self, instrument_id: str, order_id: str) -> Order:
+        return self.service.cancel_order(order_id)
+
+    def get_order(self, instrument_id: str, order_id: str) -> Order:
+        loaded = self.service.repository.load_order(order_id)
+        if loaded is None:
+            raise ValueError(f"本地不存在订单: {order_id}")
+        return loaded
+
+    def get_open_orders(self, instrument_id: str | None = None) -> list[Order]:
+        if instrument_id is None:
+            return list(self._open_orders)
+        return [o for o in self._open_orders if o.request.instrument_id == instrument_id]

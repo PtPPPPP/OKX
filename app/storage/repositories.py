@@ -186,219 +186,6 @@ class TradingRepository:
             private_state_version=int(row["private_state_version"]),
         )
 
-    def load_submission_started_at(self, proposal_id: str) -> datetime | None:
-        with self.database.connect() as connection:
-            row = connection.execute(
-                "SELECT event_time FROM demo_order_proposal_events WHERE proposal_id=? AND event_type='submission_started' ORDER BY event_id LIMIT 1",
-                (proposal_id,),
-            ).fetchone()
-        return datetime.fromisoformat(str(row[0])) if row else None
-
-    def count_controlled_demo_submissions(self) -> int:
-        with self.database.connect() as connection:
-            row = connection.execute(
-                "SELECT COUNT(*) FROM demo_order_proposals WHERE submission_performed=1 AND status != 'operationally_not_created'"
-            ).fetchone()
-        return int(row[0])
-
-    def close_unknown_order_operationally_not_created(
-        self, proposal_id: str, *, reason: str
-    ) -> None:
-        """Close only with an explicit operator decision; preserve the complete audit trail."""
-        with self.database.connect() as connection:
-            row = connection.execute(
-                "SELECT client_order_id,status,submission_performed FROM demo_order_proposals WHERE proposal_id=?",
-                (proposal_id,),
-            ).fetchone()
-            if (
-                row is None
-                or str(row["status"]) != "unknown"
-                or not bool(row["submission_performed"])
-            ):
-                raise ValueError("proposal is not an unknown submitted order")
-            changed = connection.execute(
-                "UPDATE demo_order_proposals SET status='operationally_not_created', invalidation_reason=? WHERE proposal_id=? AND status='unknown'",
-                (reason, proposal_id),
-            ).rowcount
-            if changed != 1:
-                raise ValueError("proposal status changed concurrently")
-            connection.execute(
-                "UPDATE orders SET state='rejected', updated_at=? WHERE client_order_id=? AND state='unknown'",
-                (_now(), str(row["client_order_id"])),
-            )
-            self._save_proposal_event(
-                connection,
-                proposal_id,
-                "operationally_closed",
-                "unknown",
-                "operationally_not_created",
-                reason,
-                {"operator_override": True, "submission_performed_preserved": True},
-            )
-
-    def resolve_unknown_order_from_authoritative_read(
-        self,
-        proposal_id: str,
-        authoritative: Order,
-    ) -> None:
-        """Apply one authoritative read without making the private state immediately healthy."""
-        if (
-            authoritative.state in {OrderState.CREATED, OrderState.SUBMITTED, OrderState.UNKNOWN}
-            or not authoritative.exchange_order_id
-        ):
-            raise ValueError("authoritative recovery order is not conclusive")
-        with self.database.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                """SELECT p.client_order_id,p.instrument_id,p.status,p.submission_performed,
-                o.state AS order_state
-                FROM demo_order_proposals p
-                JOIN orders o ON o.client_order_id=p.client_order_id
-                WHERE p.proposal_id=?""",
-                (proposal_id,),
-            ).fetchone()
-            if (
-                row is None
-                or str(row["status"]) != "unknown"
-                or not bool(row["submission_performed"])
-                or str(row["order_state"]) != "unknown"
-                or authoritative.request.client_order_id != str(row["client_order_id"])
-                or authoritative.request.instrument_id != str(row["instrument_id"])
-            ):
-                raise ValueError("proposal is not the matching unknown submitted order")
-            order_changed = connection.execute(
-                """UPDATE orders SET exchange_order_id=?,state=?,filled_quantity=?,
-                average_price=?,updated_at=? WHERE client_order_id=? AND state='unknown'""",
-                (
-                    authoritative.exchange_order_id,
-                    authoritative.state.value,
-                    str(authoritative.filled_quantity),
-                    _decimal_text(authoritative.average_price),
-                    (authoritative.updated_at or datetime.now(UTC)).isoformat(),
-                    str(row["client_order_id"]),
-                ),
-            ).rowcount
-            proposal_changed = connection.execute(
-                """UPDATE demo_order_proposals SET status='submitted',exchange_order_id=?
-                WHERE proposal_id=? AND status='unknown'""",
-                (authoritative.exchange_order_id, proposal_id),
-            ).rowcount
-            if order_changed != 1 or proposal_changed != 1:
-                raise RuntimeError("unknown order recovery changed concurrently")
-            remaining = int(
-                connection.execute("SELECT COUNT(*) FROM orders WHERE state='unknown'").fetchone()[
-                    0
-                ]
-            )
-            connection.execute(
-                """UPDATE private_state_control
-                SET status=?,unknown_order_count=?,version=version+1,
-                dirty_reasons_json=?,updated_at=? WHERE control_id=1""",
-                (
-                    "reconciling_expected" if remaining == 0 else "frozen",
-                    remaining,
-                    _json(
-                        {
-                            "items": [
-                                "authoritative_unknown_recovery_requires_reconciliation"
-                                if remaining == 0
-                                else "unresolved_unknown_submission"
-                            ]
-                        }
-                    ),
-                    _now(),
-                ),
-            )
-            self._save_proposal_event(
-                connection,
-                proposal_id,
-                "unknown_order_recovered",
-                "unknown",
-                "submitted",
-                "authoritative_read_applied",
-                {
-                    "exchange_order_id": authoritative.exchange_order_id,
-                    "order_state": authoritative.state.value,
-                    "remaining_unknown_order_count": remaining,
-                },
-            )
-
-    def save_unknown_recovery(self, result: Any) -> None:
-        with self.database.connect() as connection:
-            connection.execute(
-                "INSERT INTO unknown_order_recoveries VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    result.recovery_id,
-                    result.proposal_id,
-                    result.local_order_id,
-                    result.original_client_order_id,
-                    result.recovery_status,
-                    result.confidence,
-                    result.exchange_order_id,
-                    _json({"items": result.blockers}),
-                    _json({"items": result.warnings}),
-                    result.created_at.isoformat(),
-                    result.created_at.isoformat(),
-                ),
-            )
-            for q in result.queries:
-                connection.execute(
-                    "INSERT INTO unknown_order_recovery_queries (recovery_id,endpoint,begin_at,end_at,pages_read,records_read,completed,http_status,okx_code,error_classification,error_message,contract_status,applicability_status,blocking,superseded_by,first_record_time,last_record_time) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (
-                        result.recovery_id,
-                        q.endpoint,
-                        q.begin.isoformat() if q.begin else None,
-                        q.end.isoformat() if q.end else None,
-                        q.pages_read,
-                        q.records_read,
-                        int(q.completed),
-                        q.http_status,
-                        q.okx_code,
-                        q.error_classification,
-                        q.error_message,
-                        q.contract_status,
-                        q.applicability_status,
-                        int(q.blocking),
-                        q.superseded_by,
-                        q.first_record_time.isoformat() if q.first_record_time else None,
-                        q.last_record_time.isoformat() if q.last_record_time else None,
-                    ),
-                )
-
-    def load_unknown_recoveries(self, proposal_id: str) -> list[dict[str, Any]]:
-        with self.database.connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM unknown_order_recoveries WHERE proposal_id=? ORDER BY created_at",
-                (proposal_id,),
-            ).fetchall()
-            return [dict(row) for row in rows]
-
-    def initialize_inventory_scope(
-        self,
-        *,
-        strategy_name: str,
-        run_id: str,
-        instrument_id: str,
-        scope: str,
-        quantity: Decimal,
-        average_cost: Decimal | None,
-    ) -> None:
-        now = _now()
-        with self.database.connect() as connection:
-            connection.execute(
-                "INSERT OR IGNORE INTO managed_inventory (strategy_name,run_id,instrument_id,inventory_scope,acquired_quantity,disposed_quantity,reserved_quantity,average_cost,realized_pnl,created_at,updated_at) VALUES (?,?,?,?,?,'0','0',?,'0',?,?)",
-                (
-                    strategy_name,
-                    run_id,
-                    instrument_id,
-                    scope,
-                    str(quantity),
-                    _decimal_text(average_cost),
-                    now,
-                    now,
-                ),
-            )
-
     def managed_strategy_quantity(
         self, strategy_name: str, run_id: str, instrument_id: str
     ) -> Decimal:
@@ -412,46 +199,6 @@ class TradingRepository:
             if row is None
             else Decimal(str(row[0])) - Decimal(str(row[1])) - Decimal(str(row[2]))
         )
-
-    def managed_strategy_position(
-        self, strategy_name: str, run_id: str, instrument_id: str
-    ) -> tuple[Decimal, Decimal | None]:
-        """Return only inventory owned by this strategy run, never account inventory."""
-        with self.database.connect() as connection:
-            row = connection.execute(
-                "SELECT acquired_quantity,disposed_quantity,reserved_quantity,average_cost FROM managed_inventory WHERE strategy_name=? AND run_id=? AND instrument_id=? AND inventory_scope='strategy_managed'",
-                (strategy_name, run_id, instrument_id),
-            ).fetchone()
-        if row is None:
-            return Decimal("0"), None
-        quantity = Decimal(str(row[0])) - Decimal(str(row[1])) - Decimal(str(row[2]))
-        return quantity, Decimal(str(row[3])) if row[3] is not None else None
-
-    def managed_strategy_quantity_for_generation(
-        self, strategy_name: str, run_id: str, instrument_id: str, generation_id: str
-    ) -> Decimal:
-        quantity, _ = self.managed_strategy_position_for_generation(
-            strategy_name, run_id, instrument_id, generation_id
-        )
-        return quantity
-
-    def managed_strategy_position_for_generation(
-        self, strategy_name: str, run_id: str, instrument_id: str, generation_id: str
-    ) -> tuple[Decimal, Decimal | None]:
-        """Return inventory only when its source run belongs to the requested generation."""
-        with self.database.connect() as connection:
-            row = connection.execute(
-                """SELECT mi.acquired_quantity,mi.disposed_quantity,mi.reserved_quantity,mi.average_cost
-                FROM managed_inventory AS mi
-                JOIN continuous_demo_runs AS run ON run.run_id=mi.run_id
-                WHERE mi.strategy_name=? AND mi.run_id=? AND mi.instrument_id=?
-                  AND mi.inventory_scope='strategy_managed' AND run.generation_id=?""",
-                (strategy_name, run_id, instrument_id, generation_id),
-            ).fetchone()
-        if row is None:
-            return Decimal("0"), None
-        quantity = Decimal(str(row[0])) - Decimal(str(row[1])) - Decimal(str(row[2]))
-        return quantity, Decimal(str(row[3])) if row[3] is not None else None
 
     def apply_managed_fill(
         self,
@@ -577,19 +324,6 @@ class TradingRepository:
         """Append a proposal revalidation lifecycle event (public, append-only)."""
         with self.database.connect() as connection:
             self._save_proposal_event(connection, proposal_id, event_type, None, None, reason, {})
-
-    def defer_fenced_demo_order_proposal(self, proposal_id: str, reason: str) -> None:
-        """Keep a proposal unconsumed when the state changed after its fence."""
-        with self.database.connect() as connection:
-            self._save_proposal_event(
-                connection,
-                proposal_id,
-                "submission_deferred",
-                "ready_for_confirmation",
-                "ready_for_confirmation",
-                reason,
-                {},
-            )
 
     def begin_controlled_demo_submission(
         self, proposal: DemoOrderProposal, *, maximum_submissions: int = 1
@@ -954,31 +688,6 @@ class TradingRepository:
                 values,
             )
 
-    def save_candle_metadata(
-        self,
-        instrument_id: str,
-        bar: str,
-        first_timestamp: datetime,
-        last_timestamp: datetime,
-        row_count: int,
-        source: str,
-    ) -> None:
-        with self.database.connect() as connection:
-            connection.execute(
-                """INSERT INTO candle_metadata
-                (instrument_id, bar, first_timestamp, last_timestamp, row_count, source, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    instrument_id,
-                    bar,
-                    first_timestamp.isoformat(),
-                    last_timestamp.isoformat(),
-                    row_count,
-                    source,
-                    _now(),
-                ),
-            )
-
     def save_risk_decision(self, signal_id: str, decision: RiskDecision) -> None:
         adjusted = decision.adjusted_order
         with self.database.connect() as connection:
@@ -1099,14 +808,6 @@ class TradingRepository:
             )
             rows = connection.execute(query, terminal).fetchall()
         return [self._row_to_order(row) for row in rows]
-
-    def load_recent_order_times(self, since: datetime) -> tuple[datetime, ...]:
-        with self.database.connect() as connection:
-            rows = connection.execute(
-                "SELECT created_at FROM orders WHERE created_at >= ? ORDER BY created_at",
-                (since.isoformat(),),
-            ).fetchall()
-        return tuple(datetime.fromisoformat(str(row["created_at"])) for row in rows)
 
     def load_cost_fills(self, instrument_id: str) -> list[CostFill]:
         with self.database.connect() as connection:

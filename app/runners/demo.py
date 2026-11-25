@@ -46,6 +46,7 @@ class DemoEvaluationRunner:
         clock: BacktestClock,
         daily_pnl: Decimal | None,
         drawdown_pct: Decimal | None,
+        submit_latest_bar: bool = False,
     ) -> None:
         self.run_id = run_id
         self.bar = bar
@@ -54,6 +55,7 @@ class DemoEvaluationRunner:
         self.clock = clock
         self.daily_pnl = daily_pnl
         self.drawdown_pct = drawdown_pct
+        self.submit_latest_bar = submit_latest_bar
 
     def run(self) -> DemoEvaluationResult:
         interval = BAR_INTERVALS.get(self.bar.lower())
@@ -62,11 +64,14 @@ class DemoEvaluationRunner:
         if not self.candles:
             raise ValueError("观察模式没有已确认收盘 K 线")
         evaluations: list[DemoEvaluation] = []
+        submitted_any = False
+        last_index = len(self.candles) - 1
         self.engine.start()
         try:
-            for candle in self.candles:
+            for index, candle in enumerate(self.candles):
                 self.clock.advance_to(candle.timestamp + interval)
                 signals = self.engine.generate_signals(candle)
+                should_submit = self.submit_latest_bar and index == last_index
                 for signal in signals:
                     execution = None
                     if signal.action is not SignalAction.HOLD:
@@ -78,8 +83,10 @@ class DemoEvaluationRunner:
                                 daily_pnl=self.daily_pnl,
                                 drawdown_pct=self.drawdown_pct,
                             ),
-                            submit_orders=False,
+                            submit_orders=should_submit,
                         )
+                        if execution is not None and execution.order is not None:
+                            submitted_any = True
                     evaluations.append(
                         DemoEvaluation(
                             signal,
@@ -88,7 +95,11 @@ class DemoEvaluationRunner:
                     )
         finally:
             self.engine.stop()
-        return DemoEvaluationResult(self.run_id, tuple(evaluations))
+        return DemoEvaluationResult(
+            self.run_id,
+            tuple(evaluations),
+            submitted_order=submitted_any,
+        )
 
 
 @dataclass(frozen=True, slots=True)

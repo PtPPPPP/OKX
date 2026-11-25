@@ -325,3 +325,75 @@ def test_authorization_rejects_scope_and_budget_bypasses(
             private_state_version=1,
             environment=TradingEnvironment.DEMO,
         )
+
+
+def test_demo_broker_controlled_engine_submission_and_network_timeout_unknown(
+    tmp_path: Path,
+) -> None:
+    from app.domain.order import ApprovedOrder, ProposedOrder
+    from app.exchange.exceptions import NetworkError
+    from app.services.controlled_demo_write import ControlledDemoExecutionBroker
+
+    database = Database(f"sqlite:///{tmp_path / 'demo-broker-p3.db'}")
+    database.initialize()
+    repository = TradingRepository(database)
+    req = _request()
+    proposed = ProposedOrder(
+        client_order_id=req.client_order_id,
+        run_id=req.run_id,
+        strategy_name=req.strategy_name,
+        instrument_id=req.instrument_id,
+        side=req.side,
+        order_type=req.order_type,
+        quantity=req.quantity,
+        price=req.price,
+        signal_id=req.signal_id,
+        created_at=req.created_at,
+        mode=req.mode,
+        bar=req.bar,
+        order_source=req.order_source,
+    )
+    approved = ApprovedOrder(
+        proposed=proposed,
+        approved_at=req.created_at,
+        approval_reason="approved",
+    )
+
+    class _BrokerClient(FakeWriteClient):
+        def __init__(self, *, fail_network: bool = False) -> None:
+            super().__init__()
+            self.fail_network = fail_network
+
+        def place_order(
+            self,
+            request: OrderRequest,
+            *,
+            authorization: DemoWriteAuthorization | None = None,
+        ) -> Order:
+            if self.fail_network:
+                require_place_authorization(authorization, request)
+                raise NetworkError("simulated transport timeout")
+            return super().place_order(request, authorization=authorization)
+
+    # 1. ControlledDemoExecutionBroker issues one-use authorization and persists ACCEPTED order
+    ok_client = _BrokerClient()
+    active_broker = ControlledDemoExecutionBroker(
+        ControlledDemoWriteService(repository, ok_client),
+        private_state_version=1,
+    )
+    placed = active_broker.submit_order(approved)
+    assert placed.state is OrderState.ACCEPTED
+    assert ok_client.place_calls == 1
+
+    # 2. Network timeout transitions order to UNKNOWN in SQLite so it is never blindly resent
+    timeout_proposed = replace(proposed, client_order_id="cl-timeout-1", signal_id="sig-timeout-1")
+    timeout_approved = replace(approved, proposed=timeout_proposed)
+    timeout_broker = ControlledDemoExecutionBroker(
+        ControlledDemoWriteService(repository, _BrokerClient(fail_network=True)),
+        private_state_version=1,
+    )
+    with pytest.raises(NetworkError):
+        timeout_broker.submit_order(timeout_approved)
+    saved = repository.load_order("cl-timeout-1")
+    assert saved is not None
+    assert saved.state is OrderState.UNKNOWN

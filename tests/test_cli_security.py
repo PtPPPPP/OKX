@@ -34,3 +34,17 @@ def test_demo_cancellation_requires_explicit_confirmation() -> None:
     )
     assert result.exit_code == 1
     assert "--confirm-demo-cancellation" in result.output
+
+
+def test_run_demo_execute_orders_requires_explicit_confirmation() -> None:
+    result = CliRunner().invoke(
+        app,
+        [
+            "run-demo",
+            "--config",
+            "configs/btc_ma_demo.yaml",
+            "--execute-demo-orders",
+        ],
+    )
+    assert result.exit_code == 1
+    assert "--confirm-demo-order" in result.output

@@ -357,9 +357,29 @@ def observe_demo(
 @app.command("run-demo")
 def run_demo(
     config_path: Annotated[Path | None, typer.Option("--config")] = None,
+    execute_demo_orders: Annotated[
+        bool,
+        typer.Option(
+            "--execute-demo-orders",
+            help="在最新已确认收盘 K 线上向 OKX 模拟盘真实提交通过风控的限价单（默认只读干跑）",
+        ),
+    ] = False,
+    confirm_demo_order: Annotated[
+        bool,
+        typer.Option(
+            "--confirm-demo-order",
+            help="明确确认允许提交一笔受控 OKX 模拟盘限价单",
+        ),
+    ] = False,
 ) -> None:
+    if execute_demo_orders and not confirm_demo_order:
+        _fail("启用 --execute-demo-orders 时必须同时显式提供 --confirm-demo-order")
     config, settings = _load("run-demo", config_path, mode=TradingMode.DEMO)
-    session = build_demo_evaluation_session(config, settings)
+    session = build_demo_evaluation_session(
+        config,
+        settings,
+        execute_orders=execute_demo_orders,
+    )
     result = session.run()
     typer.echo(json.dumps(asdict(result), ensure_ascii=False, indent=2, default=str))
 

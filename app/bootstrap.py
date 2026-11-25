@@ -11,6 +11,7 @@ from app.domain.events import EventBus
 from app.domain.position import Portfolio, PortfolioSnapshot
 from app.exchange.okx_client import OkxClient
 from app.execution.backtest_broker import BacktestBroker
+from app.execution.base import Broker
 from app.execution.read_only_broker import ReadOnlyBroker
 from app.market.providers import (
     CSVMarketDataProvider,
@@ -33,6 +34,10 @@ from app.runners.demo import (
     StaticPortfolioSource,
 )
 from app.runtime.clock import BacktestClock, SystemClock
+from app.services.controlled_demo_write import (
+    ControlledDemoExecutionBroker,
+    ControlledDemoWriteService,
+)
 from app.services.private_state_coordinator import PrivateStateCoordinator
 from app.services.reconciliation import ReconciliationStatus
 from app.session import SessionDescriptor, TradingSession
@@ -205,7 +210,12 @@ def build_backtest_session(config: RunConfig, settings: Settings) -> TradingSess
         raise
 
 
-def build_demo_evaluation_session(config: RunConfig, settings: Settings) -> TradingSession:
+def build_demo_evaluation_session(
+    config: RunConfig,
+    settings: Settings,
+    *,
+    execute_orders: bool = False,
+) -> TradingSession:
     if config.mode is not TradingMode.DEMO:
         raise ValueError("模拟观察 Session 要求 mode=demo")
     settings.require_demo_credentials()
@@ -258,6 +268,15 @@ def build_demo_evaluation_session(config: RunConfig, settings: Settings) -> Trad
         clock = BacktestClock(confirmed[0].timestamp)
         portfolio_source = StaticPortfolioSource(sync.portfolio)
         event_bus = EventBus(repository)
+        broker: Broker = (
+            ControlledDemoExecutionBroker(
+                ControlledDemoWriteService(repository, client),
+                sync.open_orders,
+                private_state_version=1,
+            )
+            if execute_orders
+            else ReadOnlyBroker(sync.open_orders)
+        )
         engine = TradingEngine(
             run_id=run_id,
             mode=TradingMode.DEMO,
@@ -266,7 +285,7 @@ def build_demo_evaluation_session(config: RunConfig, settings: Settings) -> Trad
             strategy=strategy,
             position_sizer=position_sizer,
             risk_manager=risk_manager,
-            broker=ReadOnlyBroker(sync.open_orders),
+            broker=broker,
             portfolio=portfolio_source,
             clock=clock,
             event_bus=event_bus,
@@ -285,6 +304,7 @@ def build_demo_evaluation_session(config: RunConfig, settings: Settings) -> Trad
             clock=clock,
             daily_pnl=daily_pnl,
             drawdown_pct=drawdown,
+            submit_latest_bar=execute_orders,
         )
         return TradingSession(
             descriptor=SessionDescriptor(

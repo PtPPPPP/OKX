@@ -5,7 +5,7 @@ from collections.abc import Callable
 from typing import Protocol
 
 from app.domain.order import ApprovedOrder, Order, OrderRequest, OrderState
-from app.exchange.exceptions import OrderRejected
+from app.exchange.exceptions import NetworkError, OrderRejected
 from app.execution.demo_write_authorization import DemoWriteAuthorization
 from app.runtime.clock import Clock
 from app.storage.repositories import TradingRepository
@@ -74,6 +74,18 @@ class OKXDemoBroker:
             self.repository.save_order(order)
             logger.warning(
                 "模拟盘订单被拒绝",
+                extra={
+                    "client_order_id": request.client_order_id,
+                    "instrument_id": request.instrument_id,
+                    "order_state": order.state.value,
+                },
+            )
+            raise
+        except NetworkError:
+            order.transition(OrderState.UNKNOWN, at=self.client.clock.now())
+            self.repository.save_order(order)
+            logger.error(
+                "模拟盘下单网络超时，订单状态已标记为 UNKNOWN，禁止盲目重发",
                 extra={
                     "client_order_id": request.client_order_id,
                     "instrument_id": request.instrument_id,
