@@ -523,3 +523,35 @@ def test_demo_broker_controlled_engine_submission_and_network_timeout_unknown(
     algo_broker.submit_order(replace(approved, proposed=sell_exit))
     assert algo_client.algo_cancel_calls == 1
     assert len(algo_broker.active_algo_orders) == 0
+
+    # 5. Microstructure BBO Maker POST_ONLY pricing clamps aggressive buy below ask1
+    class _BboClient(_BrokerClient):
+        def get_ticker(self, instrument_id: str) -> tuple[Decimal, Decimal, Decimal, datetime]:
+            # bid1 = 99.8, ask1 = 100.0; reference signal price is 100.5 -> must clamp to 99.9 (ask1 - tick)
+            return Decimal("99.8"), Decimal("100.0"), Decimal("99.9"), req.created_at
+
+    bbo_client = _BboClient()
+    bbo_service = ControlledDemoWriteService(
+        repository,
+        bbo_client,
+        max_order_notional=Decimal("50"),
+        allowed_instrument_id="BTC-USDT",
+        environment=TradingEnvironment.LIVE,
+        use_post_only=True,
+        price_tick=Decimal("0.1"),
+    )
+    bbo_broker = ControlledDemoExecutionBroker(
+        bbo_service,
+        private_state_version=1,
+        enable_exchange_stop_loss=False,
+    )
+    aggressive_buy = replace(
+        live_proposed,
+        client_order_id="cl-bbo-buy-1",
+        signal_id="sig-bbo-buy-1",
+        price=Decimal("100.5"),
+        quantity=Decimal("0.2"),
+    )
+    placed_bbo = bbo_broker.submit_order(replace(approved, proposed=aggressive_buy))
+    assert placed_bbo.request.order_type is OrderType.POST_ONLY
+    assert placed_bbo.request.price == Decimal("99.9")

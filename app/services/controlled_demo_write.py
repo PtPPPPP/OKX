@@ -24,6 +24,7 @@ from app.execution.demo_write_authorization import (
     DemoWriteOperation,
     _issue_demo_write_authorization,
 )
+from app.execution.order_manager import resolve_bbo_maker_price
 from app.services.demo_order_preflight import DemoOrderProposal
 from app.storage.repositories import TradingRepository
 
@@ -56,12 +57,16 @@ class ControlledDemoWriteService:
         max_order_notional: Decimal = MAXIMUM_DEMO_NOTIONAL,
         allowed_instrument_id: str = "BTC-USDT",
         environment: TradingEnvironment = TradingEnvironment.DEMO,
+        use_post_only: bool = False,
+        price_tick: Decimal = Decimal("0.1"),
     ) -> None:
         self.repository = repository
         self.client = client
         self.max_order_notional = max_order_notional
         self.allowed_instrument_id = allowed_instrument_id
         self.environment = environment
+        self.use_post_only = use_post_only
+        self.price_tick = price_tick
 
     def place_order(self, local_order: Order) -> Order:
         proposal_id = local_order.request.signal_id
@@ -140,6 +145,23 @@ class ControlledDemoWriteService:
         private_state_version: int = 1,
     ) -> Order:
         request = approved.proposed.to_request()
+        if self.use_post_only or request.order_type is OrderType.POST_ONLY:
+            bid_px: Decimal | None = None
+            ask_px: Decimal | None = None
+            ticker_fn = getattr(self.client, "get_ticker", None)
+            if ticker_fn is not None:
+                try:
+                    bid_px, ask_px, _, _ = ticker_fn(request.instrument_id)
+                except Exception:
+                    bid_px, ask_px = None, None
+            maker_price = resolve_bbo_maker_price(
+                request.side,
+                request.price,
+                bid_price=bid_px,
+                ask_price=ask_px,
+                price_tick=self.price_tick,
+            )
+            request = replace(request, price=maker_price, order_type=OrderType.POST_ONLY)
         local_order = Order(request=request)
         self.repository.save_order(local_order)
         authorization = _issue_demo_write_authorization(

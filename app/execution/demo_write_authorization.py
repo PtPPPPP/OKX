@@ -204,8 +204,8 @@ def _validate_scope(
         raise PermissionError("Demo writes are restricted to SPOT")
     if trade_mode is not TradeMode.CASH:
         raise PermissionError("Demo writes are restricted to cash mode")
-    if request.order_type is not OrderType.LIMIT:
-        raise PermissionError("Demo writes are restricted to LIMIT orders")
+    if request.order_type not in {OrderType.LIMIT, OrderType.POST_ONLY}:
+        raise PermissionError("Demo writes are restricted to LIMIT or POST_ONLY orders")
     expected_mode = "live" if environment is TradingEnvironment.LIVE else "demo"
     if request.mode != expected_mode:
         raise PermissionError(f"Write authorization requires mode={expected_mode}")

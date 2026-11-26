@@ -21,6 +21,7 @@ class StrictModel(BaseModel):
 class ExchangeConfig(StrictModel):
     name: Literal["okx"] = "okx"
     simulated: bool = True
+    post_only: bool = False
 
 
 class MarketConfig(StrictModel):

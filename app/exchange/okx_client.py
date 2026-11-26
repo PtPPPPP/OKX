@@ -455,16 +455,17 @@ class OkxClient:
         self.settings.require_demo_credentials()
         self.probe_demo_environment()
         require_place_authorization(authorization, request)
-        if request.order_type is not OrderType.LIMIT:
-            raise ValueError("当前 MVP 只允许模拟盘限价单")
+        if request.order_type not in {OrderType.LIMIT, OrderType.POST_ONLY}:
+            raise ValueError("当前只允许限价单 (LIMIT / POST_ONLY)")
         order = Order(request=request)
         order.transition(OrderState.SUBMITTED, at=self.clock.now())
+        ord_type = "post_only" if request.order_type is OrderType.POST_ONLY else "limit"
         body = {
             "instId": request.instrument_id,
             "tdMode": "cash",
             "clOrdId": request.client_order_id,
             "side": request.side.value,
-            "ordType": "limit",
+            "ordType": ord_type,
             "px": str(request.price),
             "sz": str(request.quantity),
         }

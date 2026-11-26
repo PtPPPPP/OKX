@@ -291,6 +291,8 @@ def build_demo_evaluation_session(
                     max_order_notional=config.risk.max_order_notional,
                     allowed_instrument_id=instrument.instrument_id,
                     environment=target_env,
+                    use_post_only=config.exchange.post_only,
+                    price_tick=instrument.price_tick,
                 ),
                 sync.open_orders,
                 private_state_version=1,

@@ -131,8 +131,8 @@ class BacktestBroker:
             return existing
         if proposed.instrument_id != self.instrument.instrument_id:
             raise ValueError("Broker 收到不匹配的交易品种")
-        if proposed.order_type not in {OrderType.LIMIT, OrderType.MARKET}:
-            raise ValueError("回测 Broker 只支持 LIMIT 和显式保护性 MARKET 卖单")
+        if proposed.order_type not in {OrderType.LIMIT, OrderType.POST_ONLY, OrderType.MARKET}:
+            raise ValueError("回测 Broker 只支持 LIMIT、POST_ONLY 和显式保护性 MARKET 卖单")
         if proposed.order_type is OrderType.MARKET and proposed.side is not OrderSide.SELL:
             raise ValueError("回测 MARKET 仅用于显式减仓")
         if (
@@ -214,7 +214,18 @@ class BacktestBroker:
         price = (reference * multiplier / self.instrument.price_tick).to_integral_value(
             rounding=rounding
         ) * self.instrument.price_tick
-        if request.order_type is OrderType.LIMIT:
+        if request.order_type is OrderType.POST_ONLY:
+            # Passive Maker fill executes strictly at the Resting Limit price with zero taker slippage
+            if not self._intrabar:
+                crosses_immediately = (
+                    candle.open < request.price
+                    if request.side is OrderSide.BUY
+                    else candle.open > request.price
+                )
+                if crosses_immediately:
+                    return False
+            price = request.price
+        elif request.order_type is OrderType.LIMIT:
             price = (
                 min(price, request.price)
                 if request.side is OrderSide.BUY

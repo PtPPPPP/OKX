@@ -169,7 +169,7 @@ class TradingEngine:
             )
         if signal.action is SignalAction.HOLD:
             return None
-        if order_type is not OrderType.LIMIT and not (
+        if order_type not in {OrderType.LIMIT, OrderType.POST_ONLY} and not (
             self.mode is TradingMode.BACKTEST
             and signal.action in {SignalAction.SELL, SignalAction.CLOSE}
             and signal.metadata.get("protective_exit")
