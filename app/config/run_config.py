@@ -25,8 +25,15 @@ class ExchangeConfig(StrictModel):
 
 class MarketConfig(StrictModel):
     instrument_id: str = "BTC-USDT"
+    instruments: list[str] = Field(default_factory=list)
     instrument_type: InstrumentType = InstrumentType.SPOT
     bar: str = "5m"
+
+    @property
+    def effective_instruments(self) -> tuple[str, ...]:
+        if not self.instruments:
+            return (self.instrument_id,)
+        return tuple(self.instruments)
 
     @model_validator(mode="after")
     def validate_supported_market(self) -> MarketConfig:
@@ -34,6 +41,18 @@ class MarketConfig(StrictModel):
             raise ValueError("当前阶段只实现 spot 市场")
         if not self.instrument_id or "-" not in self.instrument_id:
             raise ValueError("instrument_id 格式无效")
+        if self.instruments:
+            quotes: set[str] = set()
+            seen: set[str] = set()
+            for inst in self.instruments:
+                if not inst or "-" not in inst:
+                    raise ValueError(f"instruments 包含无效格式: {inst}")
+                if inst in seen:
+                    raise ValueError(f"instruments 包含重复品种: {inst}")
+                seen.add(inst)
+                quotes.add(inst.split("-", 1)[1])
+            if len(quotes) > 1:
+                raise ValueError("多品种组合要求所有品种共享同一计价货币")
         return self
 
 
@@ -100,6 +119,7 @@ class BacktestConfig(StrictModel):
 class DataConfig(StrictModel):
     source: Literal["okx", "csv"] = "okx"
     path: Path | None = None
+    paths: dict[str, Path] = Field(default_factory=dict)
     limit: int = Field(default=300, gt=0)
     output: Path = Path("data/market_data.csv")
     instrument_snapshot: Path | None = None
@@ -108,8 +128,8 @@ class DataConfig(StrictModel):
     def validate_source(self) -> DataConfig:
         if self.source == "okx" and self.limit > 1000:
             raise ValueError("OKX 常规历史入口最多读取 1000 根 K 线；长历史使用研究下载器")
-        if self.source == "csv" and self.path is None:
-            raise ValueError("CSV 数据源必须配置 path")
+        if self.source == "csv" and self.path is None and not self.paths:
+            raise ValueError("CSV 数据源必须配置 path 或 paths")
         return self
 
 
@@ -136,6 +156,15 @@ class RunConfig(StrictModel):
         if self.strategy.acceptance_only and self.mode is not TradingMode.DEMO:
             raise ValueError("acceptance_only config is restricted to demo mode")
         return self
+
+    def with_instrument(self, instrument_id: str) -> RunConfig:
+        new_market = self.market.model_copy(
+            update={"instrument_id": instrument_id, "instruments": [instrument_id]}
+        )
+        new_data = self.data
+        if instrument_id in self.data.paths:
+            new_data = self.data.model_copy(update={"path": self.data.paths[instrument_id]})
+        return self.model_copy(update={"market": new_market, "data": new_data})
 
 
 ENVIRONMENT_OVERRIDES: dict[str, tuple[str, ...]] = {

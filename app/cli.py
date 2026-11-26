@@ -4,6 +4,7 @@ import json
 import logging
 import time
 from dataclasses import asdict
+from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Any, NoReturn
 
@@ -273,6 +274,82 @@ def backtest(
     )
 
 
+@app.command("portfolio-backtest")
+def portfolio_backtest(
+    config_path: Annotated[Path, typer.Option("--config")],
+) -> None:
+    from app.domain.market import InstrumentStatus, InstrumentType
+    from app.reproducibility import InstrumentSnapshotStore
+    from backtest.multi_asset import MultiAssetBacktestEngine
+
+    config, settings = _load("portfolio-backtest", config_path, mode=TradingMode.BACKTEST)
+    target_instruments = config.market.effective_instruments
+    store = InstrumentSnapshotStore()
+    client = OkxClient(settings)
+    instruments_map: dict[str, Instrument] = {}
+    candles_map: dict[str, list[Any]] = {}
+    try:
+        for inst_id in target_instruments:
+            base, quote = inst_id.split("-", 1)
+            snapshot_path = (
+                config.data.instrument_snapshot
+                if len(target_instruments) == 1
+                else Path(f"configs/snapshots/{inst_id}.json")
+            )
+            if snapshot_path is not None and snapshot_path.is_file():
+                instruments_map[inst_id] = store.resolve(
+                    inst_id,
+                    configured_path=snapshot_path,
+                    fetch=client.get_instrument,
+                ).instrument
+            else:
+                instruments_map[inst_id] = Instrument(
+                    instrument_id=inst_id,
+                    base_currency=base,
+                    quote_currency=quote,
+                    instrument_type=InstrumentType.SPOT,
+                    price_tick=Decimal("0.01"),
+                    quantity_step=Decimal("0.0001"),
+                    minimum_quantity=Decimal("0.0001"),
+                    minimum_notional=Decimal("1"),
+                    status=InstrumentStatus.LIVE,
+                )
+            if config.data.source == "csv":
+                csv_path = config.data.paths.get(inst_id, config.data.path)
+                if csv_path is None:
+                    _fail(f"多品种 CSV 回测缺少品种 {inst_id} 的数据文件路径")
+                candles_map[inst_id] = load_candles_csv(csv_path, bar=config.market.bar)
+            else:
+                candles_map[inst_id] = client.get_history_candles(
+                    inst_id, config.market.bar, config.data.limit
+                )
+    except (ExchangeError, ValueError) as exc:
+        _fail(str(exc))
+    finally:
+        client.close()
+
+    engine = MultiAssetBacktestEngine(
+        config=config,
+        instruments=instruments_map,
+        candles_by_instrument=candles_map,
+    )
+    res = engine.run()
+    typer.echo(
+        json.dumps(
+            {
+                "run_id": res.run_id,
+                "strategy": res.strategy_name,
+                "instruments": list(res.instruments),
+                "bar": res.bar,
+                "summary": res.summary,
+            },
+            ensure_ascii=False,
+            indent=2,
+            default=str,
+        )
+    )
+
+
 @app.command("check-okx-connection")
 def check_okx_connection(
     config_path: Annotated[Path | None, typer.Option("--config")] = None,
@@ -371,7 +448,8 @@ def _execute_trading_cycles(
         _fail("poll_interval_seconds 必须大于 0")
     if max_cycles < 0:
         _fail("max_cycles 不能为负数")
-    if not loop and max_cycles <= 1:
+    target_instruments = config.market.effective_instruments
+    if not loop and max_cycles <= 1 and len(target_instruments) == 1:
         session = build_demo_evaluation_session(
             config,
             settings,
@@ -382,35 +460,40 @@ def _execute_trading_cycles(
         typer.echo(json.dumps(asdict(result), ensure_ascii=False, indent=2, default=str))
         return
 
-    last_candle_ts: str | None = None
+    last_candle_ts_by_inst: dict[str, str] = {}
     cycle = 0
     try:
         while True:
             cycle += 1
-            session = build_demo_evaluation_session(
-                config,
-                settings,
-                execute_orders=execute_orders,
-                cancel_pending_before_submit=cancel_pending,
-            )
-            runner = session.runner
-            duplicate_bar = False
-            if isinstance(runner, DemoEvaluationRunner) and runner.candles:
-                current_bar_ts = runner.candles[-1].timestamp.isoformat()
-                if current_bar_ts == last_candle_ts:
-                    duplicate_bar = True
-                    runner.submit_latest_bar = False
-                    runner.cancel_pending_before_submit = False
-            result = session.run()
-            if hasattr(result, "latest_candle_timestamp") and result.latest_candle_timestamp:
-                last_candle_ts = str(result.latest_candle_timestamp)
-            payload = {
-                "cycle": cycle,
-                "mode": config.mode.value,
-                "duplicate_bar_skipped": duplicate_bar,
-                **asdict(result),
-            }
-            typer.echo(json.dumps(payload, ensure_ascii=False, default=str))
+            for inst_id in target_instruments:
+                inst_config = config.with_instrument(inst_id)
+                session = build_demo_evaluation_session(
+                    inst_config,
+                    settings,
+                    execute_orders=execute_orders,
+                    cancel_pending_before_submit=cancel_pending,
+                )
+                runner = session.runner
+                duplicate_bar = False
+                if isinstance(runner, DemoEvaluationRunner) and runner.candles:
+                    current_bar_ts = runner.candles[-1].timestamp.isoformat()
+                    if current_bar_ts == last_candle_ts_by_inst.get(inst_id):
+                        duplicate_bar = True
+                        runner.submit_latest_bar = False
+                        runner.cancel_pending_before_submit = False
+                result = session.run()
+                if hasattr(result, "latest_candle_timestamp") and result.latest_candle_timestamp:
+                    last_candle_ts_by_inst[inst_id] = str(result.latest_candle_timestamp)
+                payload = {
+                    "cycle": cycle,
+                    "mode": inst_config.mode.value,
+                    "instrument_id": inst_id,
+                    "duplicate_bar_skipped": duplicate_bar,
+                    **asdict(result),
+                }
+                typer.echo(json.dumps(payload, ensure_ascii=False, default=str))
+            if not loop and max_cycles <= 1:
+                break
             if max_cycles > 0 and cycle >= max_cycles:
                 break
             time.sleep(poll_interval_seconds)
