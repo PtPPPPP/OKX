@@ -17,6 +17,8 @@ _ISSUER = object()
 class DemoWriteOperation(StrEnum):
     PLACE = "place"
     CANCEL = "cancel"
+    PLACE_ALGO = "place_algo"
+    CANCEL_ALGO = "cancel_algo"
 
 
 class DemoWriteAuthorization:
@@ -81,6 +83,18 @@ class DemoWriteAuthorization:
 
     def consume_place(self, request: OrderRequest) -> None:
         self._consume(DemoWriteOperation.PLACE, request)
+
+    def consume_place_algo(self, request: OrderRequest) -> None:
+        self._consume(DemoWriteOperation.PLACE_ALGO, request)
+
+    def consume_cancel_algo(self, instrument_id: str, client_order_id: str) -> None:
+        if self._used:
+            raise PermissionError("Demo write authorization has already been used")
+        self._used = True
+        if self._operation is not DemoWriteOperation.CANCEL_ALGO:
+            raise PermissionError("Demo write authorization operation mismatch")
+        if instrument_id != self._instrument_id or client_order_id != self._client_order_id:
+            raise PermissionError("Algo cancellation authorization target mismatch")
 
     def assert_cancel_matches(self, instrument_id: str, client_order_id: str) -> None:
         if self._used:

@@ -7,7 +7,16 @@ from typing import Protocol
 
 from app.domain.environment import TradingEnvironment
 from app.domain.market import InstrumentType, TradeMode
-from app.domain.order import ApprovedOrder, Order, OrderRequest, OrderState, OrderType
+from app.domain.order import (
+    AlgoStopOrder,
+    AlgoStopOrderRequest,
+    ApprovedOrder,
+    Order,
+    OrderRequest,
+    OrderSide,
+    OrderState,
+    OrderType,
+)
 from app.exchange.exceptions import NetworkError, OrderStateUnknown
 from app.execution.demo_write_authorization import (
     MAXIMUM_DEMO_NOTIONAL,
@@ -199,6 +208,101 @@ class ControlledDemoWriteService:
             cancelled.append(controlled)
         return cancelled
 
+    def place_exchange_stop_loss(
+        self,
+        parent_order: Order,
+        *,
+        stop_price: Decimal,
+        private_state_version: int = 1,
+    ) -> AlgoStopOrder | None:
+        place_fn = getattr(self.client, "place_algo_stop_order", None)
+        if place_fn is None:
+            return None
+        req = parent_order.request
+        mode_str = req.mode or ("live" if self.environment is TradingEnvironment.LIVE else "demo")
+        client_algo_id = f"sl{req.client_order_id}"[:32]
+        algo_req = AlgoStopOrderRequest(
+            client_algo_id=client_algo_id,
+            instrument_id=req.instrument_id,
+            side=OrderSide.SELL,
+            quantity=req.quantity,
+            trigger_price=stop_price,
+            signal_id=req.signal_id,
+            created_at=req.created_at,
+            mode=mode_str,
+        )
+        synthetic_req = OrderRequest(
+            client_order_id=algo_req.client_algo_id,
+            instrument_id=algo_req.instrument_id,
+            side=algo_req.side,
+            order_type=OrderType.LIMIT,
+            quantity=algo_req.quantity,
+            price=algo_req.trigger_price,
+            signal_id=algo_req.signal_id,
+            created_at=algo_req.created_at,
+            mode=mode_str,
+        )
+        authorization = _issue_demo_write_authorization(
+            operation=DemoWriteOperation.PLACE_ALGO,
+            proposal_id=algo_req.signal_id,
+            request=synthetic_req,
+            instrument_type=InstrumentType.SPOT,
+            trade_mode=TradeMode.CASH,
+            private_state_version=private_state_version,
+            environment=self.environment,
+            max_notional=max(self.max_order_notional, synthetic_req.notional),
+            allowed_instrument_id=self.allowed_instrument_id,
+        )
+        placed_algo: AlgoStopOrder = place_fn(algo_req, authorization=authorization)
+        return placed_algo
+
+    def cancel_algo_stop_orders(
+        self,
+        algo_orders: Sequence[AlgoStopOrder],
+        *,
+        private_state_version: int = 1,
+    ) -> list[AlgoStopOrder]:
+        cancel_fn = getattr(self.client, "cancel_algo_stop_order", None)
+        if cancel_fn is None:
+            return []
+        cancelled: list[AlgoStopOrder] = []
+        mode_str = "live" if self.environment is TradingEnvironment.LIVE else "demo"
+        for algo in algo_orders:
+            if algo.state != "live" or not algo.algo_id:
+                continue
+            req = algo.request
+            synthetic_req = OrderRequest(
+                client_order_id=req.client_algo_id,
+                instrument_id=req.instrument_id,
+                side=req.side,
+                order_type=OrderType.LIMIT,
+                quantity=req.quantity,
+                price=req.trigger_price,
+                signal_id=req.signal_id,
+                created_at=req.created_at,
+                mode=mode_str,
+            )
+            authorization = _issue_demo_write_authorization(
+                operation=DemoWriteOperation.CANCEL_ALGO,
+                proposal_id=req.signal_id,
+                request=synthetic_req,
+                instrument_type=InstrumentType.SPOT,
+                trade_mode=TradeMode.CASH,
+                private_state_version=private_state_version,
+                environment=self.environment,
+                max_notional=max(self.max_order_notional, synthetic_req.notional),
+                allowed_instrument_id=self.allowed_instrument_id,
+            )
+            cancel_fn(
+                req.instrument_id,
+                algo.algo_id,
+                req.client_algo_id,
+                authorization=authorization,
+            )
+            algo.state = "cancelled"
+            cancelled.append(algo)
+        return cancelled
+
     def _validate_linkage(self, order: Order, proposal: DemoOrderProposal) -> None:
         request = order.request
         if (
@@ -225,18 +329,37 @@ class ControlledDemoExecutionBroker:
         open_orders: tuple[Order, ...] = (),
         *,
         private_state_version: int = 1,
+        enable_exchange_stop_loss: bool = True,
     ) -> None:
         self.service = service
         self._open_orders = list(open_orders)
+        self._active_algo_orders: list[AlgoStopOrder] = []
         self.private_state_version = private_state_version
+        self.enable_exchange_stop_loss = enable_exchange_stop_loss
 
     def submit_order(self, order: ApprovedOrder) -> Order:
+        if order.proposed.side is OrderSide.SELL and self._active_algo_orders:
+            self.cancel_active_algo_orders()
         placed = self.service.submit_approved_order(
             order,
             private_state_version=self.private_state_version,
         )
         if placed.is_open:
             self._open_orders.append(placed)
+        if (
+            self.enable_exchange_stop_loss
+            and order.proposed.side is OrderSide.BUY
+            and order.proposed.stop_loss_price is not None
+            and placed.state
+            in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED, OrderState.FILLED}
+        ):
+            algo = self.service.place_exchange_stop_loss(
+                placed,
+                stop_price=order.proposed.stop_loss_price,
+                private_state_version=self.private_state_version,
+            )
+            if algo is not None:
+                self._active_algo_orders.append(algo)
         return placed
 
     def cancel_order(self, instrument_id: str, order_id: str) -> Order:
@@ -263,3 +386,15 @@ class ControlledDemoExecutionBroker:
             o for o in self._open_orders if o.request.client_order_id not in cancelled_ids
         ]
         return cancelled
+
+    def cancel_active_algo_orders(self) -> list[AlgoStopOrder]:
+        cancelled = self.service.cancel_algo_stop_orders(
+            self._active_algo_orders,
+            private_state_version=self.private_state_version,
+        )
+        self._active_algo_orders = [a for a in self._active_algo_orders if a.state == "live"]
+        return cancelled
+
+    @property
+    def active_algo_orders(self) -> tuple[AlgoStopOrder, ...]:
+        return tuple(self._active_algo_orders)

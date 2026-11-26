@@ -18,7 +18,14 @@ from app.config.settings import Settings
 from app.domain.capability import MaxAvailableSize
 from app.domain.environment import TradingEnvironment
 from app.domain.market import Candle, Instrument, TradeMode
-from app.domain.order import Order, OrderRequest, OrderState, OrderType
+from app.domain.order import (
+    AlgoStopOrder,
+    AlgoStopOrderRequest,
+    Order,
+    OrderRequest,
+    OrderState,
+    OrderType,
+)
 from app.domain.position import AccountConfiguration, PortfolioSnapshot
 from app.exchange.auth_diagnostics import (
     AuthenticationCategory,
@@ -526,6 +533,83 @@ class OkxClient:
             return confirmed
         return current
 
+    def place_algo_stop_order(
+        self,
+        request: AlgoStopOrderRequest,
+        *,
+        authorization: DemoWriteAuthorization | None = None,
+    ) -> AlgoStopOrder:
+        if authorization is None:
+            raise PermissionError("Algo stop-loss order requires explicit one-use authorization")
+        self.settings.require_demo_credentials()
+        self.probe_demo_environment()
+        synthetic_req = OrderRequest(
+            client_order_id=request.client_algo_id,
+            instrument_id=request.instrument_id,
+            side=request.side,
+            order_type=OrderType.LIMIT,
+            quantity=request.quantity,
+            price=request.trigger_price,
+            signal_id=request.signal_id,
+            created_at=request.created_at,
+            mode=request.mode,
+        )
+        authorization.consume_place_algo(synthetic_req)
+        body: dict[str, Any] = {
+            "instId": request.instrument_id,
+            "tdMode": "cash",
+            "side": request.side.value,
+            "ordType": "conditional",
+            "sz": str(request.quantity),
+            "algoClOrdId": request.client_algo_id,
+            "slTriggerPx": str(request.trigger_price),
+            "slOrdPx": str(request.order_price) if request.order_price is not None else "-1",
+            "slTriggerPxType": "last",
+        }
+        payload = self._request(
+            "POST",
+            "/api/v5/trade/order-algo",
+            body=body,
+            private=True,
+            retry=False,
+            write_authorization=authorization,
+        )
+        item = self._first(payload)
+        self._check_item(item)
+        algo_id = str(item.get("algoId") or "") or None
+        return AlgoStopOrder(
+            request=request,
+            algo_id=algo_id,
+            state="live",
+            updated_at=self.clock.now(),
+        )
+
+    def cancel_algo_stop_order(
+        self,
+        instrument_id: str,
+        algo_id: str,
+        client_algo_id: str,
+        *,
+        authorization: DemoWriteAuthorization | None = None,
+    ) -> dict[str, Any]:
+        if authorization is None:
+            raise PermissionError(
+                "Algo stop-loss cancellation requires explicit one-use authorization"
+            )
+        self.probe_demo_environment()
+        authorization.consume_cancel_algo(instrument_id, client_algo_id)
+        payload = self._request(
+            "POST",
+            "/api/v5/trade/cancel-algos",
+            body={"algos": [{"instId": instrument_id, "algoId": algo_id}]},
+            private=True,
+            retry=False,
+            write_authorization=authorization,
+        )
+        item = self._first(payload)
+        self._check_item(item)
+        return item
+
     def _request(
         self,
         method: str,
@@ -541,6 +625,8 @@ class OkxClient:
             expected_operation = {
                 "/api/v5/trade/order": DemoWriteOperation.PLACE,
                 "/api/v5/trade/cancel-order": DemoWriteOperation.CANCEL,
+                "/api/v5/trade/order-algo": DemoWriteOperation.PLACE_ALGO,
+                "/api/v5/trade/cancel-algos": DemoWriteOperation.CANCEL_ALGO,
             }.get(path)
             if expected_operation is None or write_authorization is None:
                 raise PermissionError("raw OKX write request is not authorized")

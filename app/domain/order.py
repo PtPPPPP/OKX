@@ -122,6 +122,7 @@ class ProposedOrder:
     mode: str = ""
     bar: str = ""
     order_source: OrderSource = OrderSource.LEGACY
+    stop_loss_price: Decimal | None = None
 
     @property
     def notional(self) -> Decimal:
@@ -181,3 +182,24 @@ class Order:
             OrderState.CANCEL_PENDING,
             OrderState.UNKNOWN,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class AlgoStopOrderRequest:
+    client_algo_id: str
+    instrument_id: str
+    side: OrderSide
+    quantity: Decimal
+    trigger_price: Decimal
+    signal_id: str
+    created_at: datetime
+    order_price: Decimal | None = None
+    mode: str = "demo"
+
+
+@dataclass(slots=True)
+class AlgoStopOrder:
+    request: AlgoStopOrderRequest
+    algo_id: str | None = None
+    state: str = "live"
+    updated_at: datetime | None = None

@@ -443,3 +443,83 @@ def test_demo_broker_controlled_engine_submission_and_network_timeout_unknown(
     assert cancelled[0].state is OrderState.CANCELLED
     assert len(lifecycle_broker.get_open_orders("BTC-USDT")) == 0
     assert stale_client.cancel_calls == 1
+
+    # 4. Exchange-side Algo Stop-Loss: BUY order automatically attaches conditional stop-loss,
+    #    and subsequent SELL order automatically cancels the active algo stop-loss first.
+    from app.domain.order import AlgoStopOrder, AlgoStopOrderRequest
+
+    class _AlgoBrokerClient(_BrokerClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.algo_place_calls = 0
+            self.algo_cancel_calls = 0
+
+        def place_algo_stop_order(
+            self,
+            request: AlgoStopOrderRequest,
+            *,
+            authorization: DemoWriteAuthorization | None = None,
+        ) -> AlgoStopOrder:
+            assert authorization is not None
+            synthetic = OrderRequest(
+                client_order_id=request.client_algo_id,
+                instrument_id=request.instrument_id,
+                side=request.side,
+                order_type=OrderType.LIMIT,
+                quantity=request.quantity,
+                price=request.trigger_price,
+                signal_id=request.signal_id,
+                created_at=request.created_at,
+                mode=request.mode,
+            )
+            authorization.consume_place_algo(synthetic)
+            self.algo_place_calls += 1
+            return AlgoStopOrder(
+                request=request,
+                algo_id="algo-sl-1001",
+                state="live",
+                updated_at=request.created_at,
+            )
+
+        def cancel_algo_stop_order(
+            self,
+            instrument_id: str,
+            algo_id: str,
+            client_algo_id: str,
+            *,
+            authorization: DemoWriteAuthorization | None = None,
+        ) -> dict[str, str]:
+            assert authorization is not None
+            authorization.consume_cancel_algo(instrument_id, client_algo_id)
+            self.algo_cancel_calls += 1
+            return {"algoId": algo_id, "sCode": "0"}
+
+    algo_client = _AlgoBrokerClient()
+    algo_service = ControlledDemoWriteService(
+        repository,
+        algo_client,
+        max_order_notional=Decimal("50"),
+        allowed_instrument_id="BTC-USDT",
+        environment=TradingEnvironment.LIVE,
+    )
+    algo_broker = ControlledDemoExecutionBroker(algo_service, private_state_version=1)
+    buy_with_sl = replace(
+        live_proposed,
+        client_order_id="cl-buy-sl-1",
+        signal_id="sig-buy-sl-1",
+        stop_loss_price=Decimal("95.5"),
+    )
+    algo_broker.submit_order(replace(approved, proposed=buy_with_sl))
+    assert algo_client.algo_place_calls == 1
+    assert len(algo_broker.active_algo_orders) == 1
+    assert algo_broker.active_algo_orders[0].request.trigger_price == Decimal("95.5")
+
+    sell_exit = replace(
+        live_proposed,
+        client_order_id="cl-sell-exit-1",
+        signal_id="sig-sell-exit-1",
+        side=OrderSide.SELL,
+    )
+    algo_broker.submit_order(replace(approved, proposed=sell_exit))
+    assert algo_client.algo_cancel_calls == 1
+    assert len(algo_broker.active_algo_orders) == 0

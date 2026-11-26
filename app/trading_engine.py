@@ -26,7 +26,7 @@ from app.execution.order_manager import new_client_order_id
 from app.position_sizing.base import PositionSizeDecision, PositionSizer
 from app.risk.risk_manager import RiskContext, RiskManager
 from app.runtime.clock import Clock
-from app.strategies.base import Strategy
+from app.strategies.base import ProtectiveExitProvider, Strategy
 
 
 class PortfolioSource(Protocol):
@@ -196,6 +196,25 @@ class TradingEngine:
             f"size:{self.run_id}:{signal.signal_id}",
         )
         side = OrderSide.BUY if signal.action is SignalAction.BUY else OrderSide.SELL
+        stop_loss_price: Decimal | None = None
+        if side is OrderSide.BUY:
+            raw_stop: Decimal | None = None
+            if isinstance(self.strategy, ProtectiveExitProvider):
+                raw_stop = self.strategy.protective_exit_levels(price).stop_price
+            if raw_stop is None and "stop_distance_pct" in signal.metadata:
+                try:
+                    dist = Decimal(str(signal.metadata["stop_distance_pct"]))
+                    if dist.is_finite() and Decimal("0") < dist < Decimal("1"):
+                        raw_stop = price * (Decimal("1") - dist)
+                except Exception:
+                    raw_stop = None
+            if raw_stop is None and self.protective_exits.enabled:
+                raw_stop = price * (
+                    Decimal("1") - self.protective_exits.stop_loss_pct / Decimal("100")
+                )
+            if raw_stop is not None and raw_stop.is_finite() and Decimal("0") < raw_stop < price:
+                stop_loss_price = _quantize_price(raw_stop, self.instrument.price_tick)
+
         proposed = ProposedOrder(
             client_order_id=new_client_order_id(self.clock),
             run_id=self.run_id,
@@ -210,6 +229,7 @@ class TradingEngine:
             mode=self.mode.value,
             bar=self.bar,
             order_source=self._order_source(signal),
+            stop_loss_price=stop_loss_price,
         )
         open_orders = tuple(self.broker.get_open_orders(self.instrument.instrument_id))
         decision = self.risk_manager.evaluate(
