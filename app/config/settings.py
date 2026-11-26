@@ -75,17 +75,17 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_safety(self) -> Settings:
-        if self.trading_mode is TradingMode.LIVE:
-            raise ValueError("当前框架禁止 live 模式")
-        if self.allow_live_trading:
-            raise ValueError("当前框架要求 ALLOW_LIVE_TRADING=false")
+        if self.trading_mode is TradingMode.LIVE and not self.allow_live_trading:
+            raise ValueError("未显式开启 ALLOW_LIVE_TRADING=true 时禁止 live 模式")
+        if self.allow_live_trading and self.trading_mode is not TradingMode.LIVE:
+            raise ValueError("非 live 模式下当前框架要求 ALLOW_LIVE_TRADING=false")
         if not self.database_url.startswith("sqlite:///"):
             raise ValueError("当前框架仅支持 SQLite")
         return self
 
     def require_demo_credentials(self) -> None:
-        if self.trading_mode is not TradingMode.DEMO:
-            raise ValueError("该命令只能在 mode=demo 下运行")
+        if self.trading_mode not in {TradingMode.DEMO, TradingMode.LIVE}:
+            raise ValueError("该命令只能在 mode=demo 或 mode=live 下运行")
         missing = [
             name
             for name, value in (
@@ -96,7 +96,8 @@ class Settings(BaseSettings):
             if not value.get_secret_value().strip()
         ]
         if missing:
-            raise ValueError(f"模拟盘缺少凭证配置: {', '.join(missing)}")
+            label = "实盘" if self.trading_mode is TradingMode.LIVE else "模拟盘"
+            raise ValueError(f"{label}缺少凭证配置: {', '.join(missing)}")
 
     @property
     def demo_credentials_configured(self) -> bool:

@@ -78,9 +78,17 @@ DEMO_ENVIRONMENT = OkxEnvironment(
     True,
 )
 
+LIVE_ENVIRONMENT = OkxEnvironment(
+    TradingEnvironment.LIVE,
+    "https://www.okx.com",
+    "wss://ws.okx.com:8443/ws/v5/public",
+    "wss://ws.okx.com:8443/ws/v5/private",
+    False,
+)
+
 
 class OkxClient:
-    """Minimal OKX V5 REST client. Private calls are permanently demo-only."""
+    """OKX V5 REST client supporting DEMO and dual-switch unlocked LIVE mode."""
 
     def __init__(
         self,
@@ -98,8 +106,28 @@ class OkxClient:
         self.clock = clock or SystemClock()
         if not isinstance(environment, OkxEnvironment):
             raise PermissionError("OKX client requires an explicit known environment")
-        if environment.mode is not TradingEnvironment.DEMO or not environment.simulated_trading:
-            raise PermissionError("live or non-simulated OKX environment is not implemented")
+        from app.config.settings import TradingMode
+
+        if (
+            environment == DEMO_ENVIRONMENT
+            and settings.trading_mode is TradingMode.LIVE
+            and settings.allow_live_trading
+        ):
+            environment = LIVE_ENVIRONMENT
+        if environment.mode is TradingEnvironment.DEMO:
+            if not environment.simulated_trading:
+                raise PermissionError("DEMO environment requires simulated_trading=True")
+        elif environment.mode is TradingEnvironment.LIVE:
+            if (
+                environment.simulated_trading
+                or settings.trading_mode is not TradingMode.LIVE
+                or not settings.allow_live_trading
+            ):
+                raise PermissionError(
+                    "LIVE OKX environment requires TRADING_MODE=live, ALLOW_LIVE_TRADING=true, and simulated_trading=False"
+                )
+        else:
+            raise PermissionError("Unsupported OKX environment mode")
         self.environment = environment
         self._demo_environment_verified = False
         self.server_time_ms: int | None = None
@@ -531,7 +559,8 @@ class OkxClient:
             headers = {"Accept": "application/json", "Content-Type": "application/json"}
             if private:
                 headers.update(self._auth_headers(method, request_path, body_text))
-                headers["x-simulated-trading"] = "1"
+                if self.environment.simulated_trading:
+                    headers["x-simulated-trading"] = "1"
             try:
                 if private:
                     self.private_rest_calls += 1
@@ -631,10 +660,16 @@ class OkxClient:
 
     def _require_demo_environment(self) -> None:
         if (
-            self.environment.mode is not TradingEnvironment.DEMO
-            or not self.environment.simulated_trading
+            self.environment.mode is TradingEnvironment.DEMO
+            and not self.environment.simulated_trading
         ):
             raise PermissionError("OKX Demo request environment binding is invalid")
+        if self.environment.mode is TradingEnvironment.LIVE and (
+            self.environment.simulated_trading or not self.settings.allow_live_trading
+        ):
+            raise PermissionError("OKX Live request environment binding is invalid")
+        if self.environment.mode not in {TradingEnvironment.DEMO, TradingEnvironment.LIVE}:
+            raise PermissionError("OKX request environment binding is invalid")
 
     def _authentication_diagnostic(
         self,

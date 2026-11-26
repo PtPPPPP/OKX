@@ -25,6 +25,8 @@ class DemoEvaluationResult:
     run_id: str
     evaluations: tuple[DemoEvaluation, ...]
     submitted_order: bool = False
+    cancelled_order_count: int = 0
+    latest_candle_timestamp: str | None = None
 
 
 class StaticPortfolioSource:
@@ -47,6 +49,7 @@ class DemoEvaluationRunner:
         daily_pnl: Decimal | None,
         drawdown_pct: Decimal | None,
         submit_latest_bar: bool = False,
+        cancel_pending_before_submit: bool = False,
     ) -> None:
         self.run_id = run_id
         self.bar = bar
@@ -56,6 +59,7 @@ class DemoEvaluationRunner:
         self.daily_pnl = daily_pnl
         self.drawdown_pct = drawdown_pct
         self.submit_latest_bar = submit_latest_bar
+        self.cancel_pending_before_submit = cancel_pending_before_submit
 
     def run(self) -> DemoEvaluationResult:
         interval = BAR_INTERVALS.get(self.bar.lower())
@@ -65,6 +69,7 @@ class DemoEvaluationRunner:
             raise ValueError("观察模式没有已确认收盘 K 线")
         evaluations: list[DemoEvaluation] = []
         submitted_any = False
+        cancelled_count = 0
         last_index = len(self.candles) - 1
         self.engine.start()
         try:
@@ -72,6 +77,13 @@ class DemoEvaluationRunner:
                 self.clock.advance_to(candle.timestamp + interval)
                 signals = self.engine.generate_signals(candle)
                 should_submit = self.submit_latest_bar and index == last_index
+                if (
+                    should_submit
+                    and self.cancel_pending_before_submit
+                    and hasattr(self.engine.broker, "cancel_pending_orders")
+                ):
+                    cancelled = self.engine.broker.cancel_pending_orders()
+                    cancelled_count += len(cancelled)
                 for signal in signals:
                     execution = None
                     if signal.action is not SignalAction.HOLD:
@@ -99,6 +111,8 @@ class DemoEvaluationRunner:
             self.run_id,
             tuple(evaluations),
             submitted_order=submitted_any,
+            cancelled_order_count=cancelled_count,
+            latest_candle_timestamp=self.candles[-1].timestamp.isoformat(),
         )
 
 

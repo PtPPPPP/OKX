@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import replace
+from decimal import Decimal
 from typing import Protocol
 
 from app.domain.environment import TradingEnvironment
@@ -41,9 +43,16 @@ class ControlledDemoWriteService:
         self,
         repository: TradingRepository,
         client: ControlledDemoWriteClient,
+        *,
+        max_order_notional: Decimal = MAXIMUM_DEMO_NOTIONAL,
+        allowed_instrument_id: str = "BTC-USDT",
+        environment: TradingEnvironment = TradingEnvironment.DEMO,
     ) -> None:
         self.repository = repository
         self.client = client
+        self.max_order_notional = max_order_notional
+        self.allowed_instrument_id = allowed_instrument_id
+        self.environment = environment
 
     def place_order(self, local_order: Order) -> Order:
         proposal_id = local_order.request.signal_id
@@ -131,7 +140,9 @@ class ControlledDemoWriteService:
             instrument_type=InstrumentType.SPOT,
             trade_mode=TradeMode.CASH,
             private_state_version=private_state_version,
-            environment=TradingEnvironment.DEMO,
+            environment=self.environment,
+            max_notional=self.max_order_notional,
+            allowed_instrument_id=self.allowed_instrument_id,
         )
         try:
             remote_order = self.client.place_order(request, authorization=authorization)
@@ -142,6 +153,51 @@ class ControlledDemoWriteService:
             raise
         self.repository.save_order(remote_order)
         return remote_order
+
+    def cancel_open_orders(
+        self,
+        open_orders: Sequence[Order],
+        *,
+        private_state_version: int = 1,
+    ) -> list[Order]:
+        cancelled: list[Order] = []
+        for order in open_orders:
+            if not order.is_open or order.state is OrderState.UNKNOWN:
+                continue
+            request = order.request
+            if request.instrument_id != self.allowed_instrument_id:
+                continue
+            proposal_id = request.signal_id or f"cancel-{request.client_order_id}"
+            auth_request = (
+                request
+                if request.signal_id
+                else replace(
+                    request,
+                    signal_id=proposal_id,
+                    mode="live" if self.environment is TradingEnvironment.LIVE else "demo",
+                    order_type=OrderType.LIMIT,
+                )
+            )
+            authorization = _issue_demo_write_authorization(
+                operation=DemoWriteOperation.CANCEL,
+                proposal_id=proposal_id,
+                request=auth_request,
+                instrument_type=InstrumentType.SPOT,
+                trade_mode=TradeMode.CASH,
+                private_state_version=private_state_version,
+                environment=self.environment,
+                max_notional=max(self.max_order_notional, auth_request.notional),
+                allowed_instrument_id=self.allowed_instrument_id,
+            )
+            remote = self.client.cancel_order(
+                request.instrument_id,
+                request.client_order_id,
+                authorization=authorization,
+            )
+            controlled = replace(remote, request=request)
+            self.repository.save_order(controlled)
+            cancelled.append(controlled)
+        return cancelled
 
     def _validate_linkage(self, order: Order, proposal: DemoOrderProposal) -> None:
         request = order.request
@@ -196,3 +252,14 @@ class ControlledDemoExecutionBroker:
         if instrument_id is None:
             return list(self._open_orders)
         return [o for o in self._open_orders if o.request.instrument_id == instrument_id]
+
+    def cancel_pending_orders(self) -> list[Order]:
+        cancelled = self.service.cancel_open_orders(
+            self._open_orders,
+            private_state_version=self.private_state_version,
+        )
+        cancelled_ids = {o.request.client_order_id for o in cancelled}
+        self._open_orders = [
+            o for o in self._open_orders if o.request.client_order_id not in cancelled_ids
+        ]
+        return cancelled

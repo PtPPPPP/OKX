@@ -269,14 +269,31 @@ def test_authorization_object_cannot_be_constructed_by_business_code() -> None:
         )
 
 
-def test_authorization_rejects_live_environment() -> None:
-    request = _request()
+def test_authorization_allows_live_environment_with_risk_configured_budget_and_Rejects_mismatch() -> (
+    None
+):
+    live_req = replace(_request(), mode="live", quantity=Decimal("0.4"), price=Decimal("100"))
+    # 0.4 * 100 = 40 USDT, allowed when max_notional is configured to 50 USDT from risk config
+    auth = _issue_demo_write_authorization(
+        operation=DemoWriteOperation.PLACE,
+        proposal_id=live_req.signal_id,
+        request=live_req,
+        instrument_type=InstrumentType.SPOT,
+        trade_mode=TradeMode.CASH,
+        private_state_version=1,
+        environment=TradingEnvironment.LIVE,
+        max_notional=Decimal("50"),
+    )
+    auth.assert_environment_bound(TradingEnvironment.LIVE)
+    with pytest.raises(PermissionError, match="environment mismatch"):
+        auth.assert_environment_bound(TradingEnvironment.DEMO)
 
-    with pytest.raises(PermissionError, match="Demo environment"):
+    # Mode mismatch (request.mode='demo' with TradingEnvironment.LIVE) must be rejected
+    with pytest.raises(PermissionError, match="mode=live"):
         _issue_demo_write_authorization(
             operation=DemoWriteOperation.PLACE,
-            proposal_id=request.signal_id,
-            request=request,
+            proposal_id=live_req.signal_id,
+            request=_request(),
             instrument_type=InstrumentType.SPOT,
             trade_mode=TradeMode.CASH,
             private_state_version=1,
@@ -397,3 +414,32 @@ def test_demo_broker_controlled_engine_submission_and_network_timeout_unknown(
     saved = repository.load_order("cl-timeout-1")
     assert saved is not None
     assert saved.state is OrderState.UNKNOWN
+
+    # 3. Stale pending orders lifecycle: cancel_pending_orders cancels open orders before new submission
+    stale_client = _BrokerClient()
+    lifecycle_service = ControlledDemoWriteService(
+        repository,
+        stale_client,
+        max_order_notional=Decimal("50"),
+        allowed_instrument_id="BTC-USDT",
+        environment=TradingEnvironment.LIVE,
+    )
+    live_proposed = replace(
+        proposed,
+        client_order_id="cl-live-1",
+        signal_id="sig-live-1",
+        mode="live",
+        quantity=Decimal("0.3"),
+        price=Decimal("100"),
+    )
+    live_approved = replace(approved, proposed=live_proposed)
+    lifecycle_broker = ControlledDemoExecutionBroker(lifecycle_service, private_state_version=1)
+    placed_live = lifecycle_broker.submit_order(live_approved)
+    assert placed_live.state is OrderState.ACCEPTED
+    assert len(lifecycle_broker.get_open_orders("BTC-USDT")) == 1
+
+    cancelled = lifecycle_broker.cancel_pending_orders()
+    assert len(cancelled) == 1
+    assert cancelled[0].state is OrderState.CANCELLED
+    assert len(lifecycle_broker.get_open_orders("BTC-USDT")) == 0
+    assert stale_client.cancel_calls == 1

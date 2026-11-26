@@ -2,9 +2,9 @@
 
 一个精简、高内聚、以第一性原理安全边界和可复现回测为核心的 OKX 现货量化交易与投研框架。
 
-项目支持离线回测（`ohlc_limit_v2` 限价撮合）、公共行情下载与实时观察、经过 4 条硬护栏保护的 OKX Demo 模拟盘执行，以及离线个人投研与风险管理工具。它不支持实盘交易，`ALLOW_LIVE_TRADING` 固定为 `false`。
+项目支持离线回测（`ohlc_limit_v2` 限价撮合）、公共行情下载与实时观察、经过 4 条硬护栏保护的 OKX Demo 模拟盘与双重显式开关受控 LIVE 实盘执行（含常驻循环与未成交挂单自动撤单管理），以及离线个人投研与风险管理工具。
 
-> 风险声明：本项目仅用于量化工程研究和 OKX 模拟盘验证，不构成投资建议。默认不要放入任何实盘凭证；`ALLOW_LIVE_TRADING` 必须保持为 `false`。
+> 风险声明：本项目默认运行在 `backtest` / `demo` 模式（`ALLOW_LIVE_TRADING=false`）。只有在同时显式设置 `TRADING_MODE=live`、`ALLOW_LIVE_TRADING=true`、`exchange.simulated=false` 且传入 `--confirm-live-trading` 时才允许启用实盘限价单。
 
 ## 核心能力
 
@@ -102,10 +102,22 @@ uv run python -m app.cli sync-demo-account --config configs/btc_ma_demo.yaml
 uv run python -m app.cli run-demo --config configs/btc_ma_demo.yaml
 ```
 
-显式确认在最新一根已确认收盘 K 线上向 OKX 模拟盘提交通过风控的受控限价单：
+显式确认在最新一根已确认收盘 K 线上向 OKX 模拟盘提交通过风控的受控限价单（支持 `--loop` 常驻守护与新信号前自动撤销未成交旧挂单）：
 
 ```powershell
 uv run python -m app.cli run-demo --config configs/btc_ma_demo.yaml --execute-demo-orders --confirm-demo-order
+uv run python -m app.cli run-demo --config configs/btc_ma_demo.yaml --execute-demo-orders --confirm-demo-order --loop --poll-interval-seconds 60
+```
+
+双重显式开关（`TRADING_MODE=live` + `ALLOW_LIVE_TRADING=true`）受控实盘评估与常驻循环执行：
+
+```powershell
+# 1. 仅做实盘账户对账与最新 K 线信号评估（不发单）
+$env:TRADING_MODE="live"; $env:ALLOW_LIVE_TRADING="true"
+uv run python -m app.cli run-live --config configs/btc_ma_bollinger_live.yaml
+
+# 2. 显式授权实盘常驻守护（自动对账、撤除旧未成交挂单、同一根 K 线去重不重复发单、额度受 YAML risk.max_order_notional 约束）
+uv run python -m app.cli run-live --config configs/btc_ma_bollinger_live.yaml --execute-live-orders --confirm-live-trading --loop --poll-interval-seconds 60
 ```
 
 查询或撤销受控模拟盘订单：

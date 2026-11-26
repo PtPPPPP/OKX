@@ -10,7 +10,7 @@ import yaml
 from dotenv import dotenv_values
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.config.settings import TradingMode
+from app.config.settings import Settings, TradingMode
 from app.domain.market import InstrumentType
 
 
@@ -131,10 +131,8 @@ class RunConfig(StrictModel):
 
     @model_validator(mode="after")
     def validate_safety(self) -> RunConfig:
-        if self.mode is TradingMode.LIVE:
-            raise ValueError("当前框架禁止 live 模式")
-        if not self.exchange.simulated:
-            raise ValueError("当前框架要求 exchange.simulated=true")
+        if self.mode is not TradingMode.LIVE and not self.exchange.simulated:
+            raise ValueError("当前框架在非 live 模式下要求 exchange.simulated=true")
         if self.strategy.acceptance_only and self.mode is not TradingMode.DEMO:
             raise ValueError("acceptance_only config is restricted to demo mode")
         return self
@@ -195,6 +193,19 @@ def load_run_config(
     for key, value in command_line.items():
         if value is not None:
             _set_nested(data, tuple(key.split(".")), value)
+
+    effective_mode = str(data.get("mode", "")).strip().lower()
+    allow_live_raw = str(environment.get("ALLOW_LIVE_TRADING", "")).strip().lower()
+    allow_live = allow_live_raw in {"1", "true", "yes"}
+    if effective_mode == TradingMode.LIVE.value:
+        if not allow_live:
+            # Ensure Pydantic raises a ValidationError for callers expecting config validation failure
+            Settings.model_validate({"trading_mode": "live", "allow_live_trading": False})
+        exchange_dict = data.get("exchange")
+        if not isinstance(exchange_dict, dict):
+            data["exchange"] = {"name": "okx", "simulated": False}
+        elif "simulated" not in exchange_dict:
+            exchange_dict["simulated"] = False
 
     config = RunConfig.model_validate(deepcopy(data))
     from app.strategies.registry import validate_strategy_parameters

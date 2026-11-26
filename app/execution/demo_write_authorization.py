@@ -44,6 +44,8 @@ class DemoWriteAuthorization:
         trade_mode: TradeMode,
         private_state_version: int,
         environment: TradingEnvironment,
+        max_notional: Decimal = MAXIMUM_DEMO_NOTIONAL,
+        allowed_instrument_id: str = CONTROLLED_INSTRUMENT_ID,
     ) -> None:
         if issuer is not _ISSUER:
             raise PermissionError(
@@ -56,6 +58,8 @@ class DemoWriteAuthorization:
             trade_mode=trade_mode,
             private_state_version=private_state_version,
             environment=environment,
+            max_notional=max_notional,
+            allowed_instrument_id=allowed_instrument_id,
         )
         self._operation = operation
         self._environment = environment
@@ -88,7 +92,10 @@ class DemoWriteAuthorization:
             raise PermissionError("Demo write authorization is not consumed for this operation")
 
     def assert_environment_bound(self, environment: TradingEnvironment) -> None:
-        if self._environment is not TradingEnvironment.DEMO or environment is not self._environment:
+        if (
+            self._environment not in {TradingEnvironment.DEMO, TradingEnvironment.LIVE}
+            or environment is not self._environment
+        ):
             raise PermissionError("Demo write authorization environment mismatch")
 
     def consume_cancel(self, instrument_id: str, client_order_id: str) -> None:
@@ -100,11 +107,7 @@ class DemoWriteAuthorization:
     def _assert_cancel_matches(self, instrument_id: str, client_order_id: str) -> None:
         if self._operation is not DemoWriteOperation.CANCEL:
             raise PermissionError("Demo write authorization operation mismatch")
-        if (
-            instrument_id != CONTROLLED_INSTRUMENT_ID
-            or instrument_id != self._instrument_id
-            or client_order_id != self._client_order_id
-        ):
+        if instrument_id != self._instrument_id or client_order_id != self._client_order_id:
             raise PermissionError("Demo cancellation authorization target mismatch")
 
     def _consume(self, operation: DemoWriteOperation, request: OrderRequest) -> None:
@@ -149,6 +152,8 @@ def _issue_demo_write_authorization(
     trade_mode: TradeMode,
     private_state_version: int,
     environment: TradingEnvironment,
+    max_notional: Decimal = MAXIMUM_DEMO_NOTIONAL,
+    allowed_instrument_id: str = CONTROLLED_INSTRUMENT_ID,
 ) -> DemoWriteAuthorization:
     return DemoWriteAuthorization(
         _ISSUER,
@@ -159,6 +164,8 @@ def _issue_demo_write_authorization(
         trade_mode=trade_mode,
         private_state_version=private_state_version,
         environment=environment,
+        max_notional=max_notional,
+        allowed_instrument_id=allowed_instrument_id,
     )
 
 
@@ -170,29 +177,34 @@ def _validate_scope(
     trade_mode: TradeMode,
     private_state_version: int,
     environment: TradingEnvironment,
+    max_notional: Decimal = MAXIMUM_DEMO_NOTIONAL,
+    allowed_instrument_id: str = CONTROLLED_INSTRUMENT_ID,
 ) -> None:
     if not proposal_id or request.signal_id != proposal_id:
         raise PermissionError("Demo write authorization requires a matching Proposal")
-    if environment is not TradingEnvironment.DEMO:
-        raise PermissionError("Demo write authorization requires the Demo environment")
-    if request.instrument_id != CONTROLLED_INSTRUMENT_ID:
-        raise PermissionError("Demo writes are restricted to BTC-USDT")
+    if environment not in {TradingEnvironment.DEMO, TradingEnvironment.LIVE}:
+        raise PermissionError("Demo write authorization requires the Demo or Live environment")
+    if request.instrument_id != allowed_instrument_id:
+        raise PermissionError(f"Writes are restricted to {allowed_instrument_id}")
     if instrument_type is not InstrumentType.SPOT:
         raise PermissionError("Demo writes are restricted to SPOT")
     if trade_mode is not TradeMode.CASH:
         raise PermissionError("Demo writes are restricted to cash mode")
     if request.order_type is not OrderType.LIMIT:
         raise PermissionError("Demo writes are restricted to LIMIT orders")
-    if request.mode != "demo":
-        raise PermissionError("Demo write authorization requires mode=demo")
+    expected_mode = "live" if environment is TradingEnvironment.LIVE else "demo"
+    if request.mode != expected_mode:
+        raise PermissionError(f"Write authorization requires mode={expected_mode}")
     if (
         not request.quantity.is_finite()
         or not request.price.is_finite()
         or request.quantity <= 0
         or request.price <= 0
-        or request.notional > MAXIMUM_DEMO_NOTIONAL
+        or not max_notional.is_finite()
+        or max_notional <= 0
+        or request.notional > max_notional
     ):
-        raise PermissionError("Demo write exceeds the positive finite 5 USDT budget")
+        raise PermissionError(f"Write exceeds the positive finite {max_notional} USDT budget")
     if private_state_version < 0:
         raise PermissionError("Demo write authorization requires a private-state fence")
 

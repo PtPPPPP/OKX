@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Any, NoReturn
@@ -34,7 +35,7 @@ from backtest.report import write_backtest_report
 
 app = typer.Typer(
     no_args_is_help=True,
-    help="OKX 现货量化回测与受控模拟交易框架（默认 fail-closed，不支持实盘下单）",
+    help="OKX 现货量化回测、模拟交易与双重开关受控实盘 CLI",
 )
 logger = logging.getLogger(__name__)
 
@@ -354,6 +355,69 @@ def observe_demo(
     typer.echo(json.dumps(asdict(result), ensure_ascii=False, indent=2, default=str))
 
 
+def _execute_trading_cycles(
+    config: RunConfig,
+    settings: Settings,
+    *,
+    execute_orders: bool,
+    cancel_pending: bool,
+    loop: bool,
+    poll_interval_seconds: float,
+    max_cycles: int,
+) -> None:
+    from app.runners.demo import DemoEvaluationRunner
+
+    if poll_interval_seconds <= 0:
+        _fail("poll_interval_seconds 必须大于 0")
+    if max_cycles < 0:
+        _fail("max_cycles 不能为负数")
+    if not loop and max_cycles <= 1:
+        session = build_demo_evaluation_session(
+            config,
+            settings,
+            execute_orders=execute_orders,
+            cancel_pending_before_submit=cancel_pending,
+        )
+        result = session.run()
+        typer.echo(json.dumps(asdict(result), ensure_ascii=False, indent=2, default=str))
+        return
+
+    last_candle_ts: str | None = None
+    cycle = 0
+    try:
+        while True:
+            cycle += 1
+            session = build_demo_evaluation_session(
+                config,
+                settings,
+                execute_orders=execute_orders,
+                cancel_pending_before_submit=cancel_pending,
+            )
+            runner = session.runner
+            duplicate_bar = False
+            if isinstance(runner, DemoEvaluationRunner) and runner.candles:
+                current_bar_ts = runner.candles[-1].timestamp.isoformat()
+                if current_bar_ts == last_candle_ts:
+                    duplicate_bar = True
+                    runner.submit_latest_bar = False
+                    runner.cancel_pending_before_submit = False
+            result = session.run()
+            if hasattr(result, "latest_candle_timestamp") and result.latest_candle_timestamp:
+                last_candle_ts = str(result.latest_candle_timestamp)
+            payload = {
+                "cycle": cycle,
+                "mode": config.mode.value,
+                "duplicate_bar_skipped": duplicate_bar,
+                **asdict(result),
+            }
+            typer.echo(json.dumps(payload, ensure_ascii=False, default=str))
+            if max_cycles > 0 and cycle >= max_cycles:
+                break
+            time.sleep(poll_interval_seconds)
+    except KeyboardInterrupt:
+        logger.info("收到中断信号，常驻循环已安全停止", extra={"cycles": cycle})
+
+
 @app.command("run-demo")
 def run_demo(
     config_path: Annotated[Path | None, typer.Option("--config")] = None,
@@ -368,20 +432,96 @@ def run_demo(
         bool,
         typer.Option(
             "--confirm-demo-order",
-            help="明确确认允许提交一笔受控 OKX 模拟盘限价单",
+            help="明确确认允许提交受控 OKX 模拟盘限价单",
         ),
     ] = False,
+    cancel_pending: Annotated[
+        bool,
+        typer.Option(
+            "--cancel-pending/--no-cancel-pending",
+            help="提交新轮次信号前自动撤销未成交的旧限价挂单",
+        ),
+    ] = True,
+    loop: Annotated[
+        bool,
+        typer.Option("--loop", help="开启常驻守护循环，按轮次自动对账、撤旧单并评估新收盘 K 线"),
+    ] = False,
+    poll_interval_seconds: Annotated[
+        float,
+        typer.Option("--poll-interval-seconds", help="常驻循环轮询间隔秒数"),
+    ] = 60.0,
+    max_cycles: Annotated[
+        int,
+        typer.Option("--max-cycles", help="常驻循环最大轮数（0 表示持续运行直到中断）"),
+    ] = 0,
 ) -> None:
     if execute_demo_orders and not confirm_demo_order:
         _fail("启用 --execute-demo-orders 时必须同时显式提供 --confirm-demo-order")
     config, settings = _load("run-demo", config_path, mode=TradingMode.DEMO)
-    session = build_demo_evaluation_session(
+    _execute_trading_cycles(
         config,
         settings,
         execute_orders=execute_demo_orders,
+        cancel_pending=cancel_pending,
+        loop=loop,
+        poll_interval_seconds=poll_interval_seconds,
+        max_cycles=max_cycles,
     )
-    result = session.run()
-    typer.echo(json.dumps(asdict(result), ensure_ascii=False, indent=2, default=str))
+
+
+@app.command("run-live")
+def run_live(
+    config_path: Annotated[Path, typer.Option("--config")],
+    execute_live_orders: Annotated[
+        bool,
+        typer.Option(
+            "--execute-live-orders",
+            help="在最新已确认收盘 K 线上向 OKX 实盘真实提交通过风控的限价单（默认只读对账与信号评估）",
+        ),
+    ] = False,
+    confirm_live_trading: Annotated[
+        bool,
+        typer.Option(
+            "--confirm-live-trading",
+            help="明确确认已开启 TRADING_MODE=live 与 ALLOW_LIVE_TRADING=true 并授权实盘限价单",
+        ),
+    ] = False,
+    cancel_pending: Annotated[
+        bool,
+        typer.Option(
+            "--cancel-pending/--no-cancel-pending",
+            help="提交新轮次信号前自动撤销未成交的旧限价挂单",
+        ),
+    ] = True,
+    loop: Annotated[
+        bool,
+        typer.Option("--loop", help="开启实盘常驻守护循环，同一根 K 线去重不重复发单"),
+    ] = False,
+    poll_interval_seconds: Annotated[
+        float,
+        typer.Option("--poll-interval-seconds", help="常驻循环轮询间隔秒数"),
+    ] = 60.0,
+    max_cycles: Annotated[
+        int,
+        typer.Option("--max-cycles", help="常驻循环最大轮数（0 表示持续运行直到中断）"),
+    ] = 0,
+) -> None:
+    if execute_live_orders and not confirm_live_trading:
+        _fail("启用 --execute-live-orders 时必须同时显式提供 --confirm-live-trading")
+    config, settings = _load("run-live", config_path, mode=TradingMode.LIVE)
+    if not settings.allow_live_trading or config.exchange.simulated:
+        _fail(
+            "实盘模式要求同时设置 TRADING_MODE=live、ALLOW_LIVE_TRADING=true 且 exchange.simulated=false"
+        )
+    _execute_trading_cycles(
+        config,
+        settings,
+        execute_orders=execute_live_orders,
+        cancel_pending=cancel_pending,
+        loop=loop,
+        poll_interval_seconds=poll_interval_seconds,
+        max_cycles=max_cycles,
+    )
 
 
 @app.command("query-demo-order")

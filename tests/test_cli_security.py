@@ -48,3 +48,33 @@ def test_run_demo_execute_orders_requires_explicit_confirmation() -> None:
     )
     assert result.exit_code == 1
     assert "--confirm-demo-order" in result.output
+
+
+def test_run_live_requires_explicit_confirmation_and_dual_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 1. Missing --confirm-live-trading when --execute-live-orders is set
+    res1 = CliRunner().invoke(
+        app,
+        [
+            "run-live",
+            "--config",
+            "configs/btc_ma_bollinger_live.yaml",
+            "--execute-live-orders",
+        ],
+    )
+    assert res1.exit_code == 1
+    assert "--confirm-live-trading" in res1.output
+
+    # 2. Missing ALLOW_LIVE_TRADING=true in environment
+    monkeypatch.setenv("ALLOW_LIVE_TRADING", "false")
+    res2 = CliRunner().invoke(
+        app,
+        [
+            "run-live",
+            "--config",
+            "configs/btc_ma_bollinger_live.yaml",
+        ],
+    )
+    assert res2.exit_code == 1
+    assert "禁止 live" in res2.output

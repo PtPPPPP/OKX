@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from app.config.run_config import RunConfig
 from app.config.settings import Settings, TradingMode
+from app.domain.environment import TradingEnvironment
 from app.domain.events import EventBus
 from app.domain.position import Portfolio, PortfolioSnapshot
 from app.exchange.okx_client import OkxClient
@@ -215,9 +216,18 @@ def build_demo_evaluation_session(
     settings: Settings,
     *,
     execute_orders: bool = False,
+    cancel_pending_before_submit: bool = True,
 ) -> TradingSession:
-    if config.mode is not TradingMode.DEMO:
-        raise ValueError("模拟观察 Session 要求 mode=demo")
+    if config.mode not in {TradingMode.DEMO, TradingMode.LIVE}:
+        raise ValueError("交易会话要求 mode=demo 或 mode=live")
+    if config.mode is TradingMode.LIVE and (
+        settings.trading_mode is not TradingMode.LIVE
+        or not settings.allow_live_trading
+        or config.exchange.simulated
+    ):
+        raise PermissionError(
+            "实盘会话要求 TRADING_MODE=live、ALLOW_LIVE_TRADING=true 且 exchange.simulated=false"
+        )
     settings.require_demo_credentials()
     client = OkxClient(settings)
     try:
@@ -233,13 +243,15 @@ def build_demo_evaluation_session(
             run_id=run_id,
             mode=config.mode.value,
             strategy_name=config.strategy.name,
-            source="demo_evaluation_startup",
+            source=f"{config.mode.value}_evaluation_startup",
         )
 
         def require_healthy_reconciliation() -> None:
-            result = coordinator.reconcile_private_state(instrument, source="demo_evaluation")
+            result = coordinator.reconcile_private_state(
+                instrument, source=f"{config.mode.value}_evaluation"
+            )
             if result.status is not ReconciliationStatus.HEALTHY:
-                raise ValueError(f"模拟盘对账未通过: {result.message}")
+                raise ValueError(f"账户对账未通过: {result.message}")
 
         candles = client.get_history_candles(
             instrument.instrument_id, config.market.bar, config.data.limit
@@ -268,9 +280,18 @@ def build_demo_evaluation_session(
         clock = BacktestClock(confirmed[0].timestamp)
         portfolio_source = StaticPortfolioSource(sync.portfolio)
         event_bus = EventBus(repository)
+        target_env = (
+            TradingEnvironment.LIVE if config.mode is TradingMode.LIVE else TradingEnvironment.DEMO
+        )
         broker: Broker = (
             ControlledDemoExecutionBroker(
-                ControlledDemoWriteService(repository, client),
+                ControlledDemoWriteService(
+                    repository,
+                    client,
+                    max_order_notional=config.risk.max_order_notional,
+                    allowed_instrument_id=instrument.instrument_id,
+                    environment=target_env,
+                ),
                 sync.open_orders,
                 private_state_version=1,
             )
@@ -279,7 +300,7 @@ def build_demo_evaluation_session(
         )
         engine = TradingEngine(
             run_id=run_id,
-            mode=TradingMode.DEMO,
+            mode=config.mode,
             bar=config.market.bar,
             instrument=instrument,
             strategy=strategy,
@@ -305,6 +326,7 @@ def build_demo_evaluation_session(
             daily_pnl=daily_pnl,
             drawdown_pct=drawdown,
             submit_latest_bar=execute_orders,
+            cancel_pending_before_submit=cancel_pending_before_submit,
         )
         return TradingSession(
             descriptor=SessionDescriptor(

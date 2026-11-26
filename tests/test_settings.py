@@ -74,12 +74,25 @@ def test_moving_average_parameter_error_is_rejected(tmp_path: Path) -> None:
         load_run_config(path, environ={})
 
 
-def test_live_mode_is_always_rejected() -> None:
+def test_live_mode_requires_dual_switch_allow_live_trading() -> None:
     with pytest.raises(ValidationError, match="禁止 live"):
         load_run_config(None, environ={"TRADING_MODE": "live"})
+    with pytest.raises(ValidationError, match="ALLOW_LIVE_TRADING=false"):
+        Settings(trading_mode=TradingMode.DEMO, allow_live_trading=True)
+
+    # Dual-switch explicitly enabled: both TRADING_MODE=live and ALLOW_LIVE_TRADING=true
+    live_settings = Settings(trading_mode=TradingMode.LIVE, allow_live_trading=True)
+    assert live_settings.trading_mode is TradingMode.LIVE
+    assert live_settings.allow_live_trading is True
+    live_cfg = load_run_config(
+        Path("configs/btc_ma_bollinger_live.yaml"),
+        environ={"TRADING_MODE": "live", "ALLOW_LIVE_TRADING": "true"},
+    )
+    assert live_cfg.mode is TradingMode.LIVE
+    assert live_cfg.exchange.simulated is False
 
 
-def test_application_live_mode_is_always_rejected() -> None:
+def test_application_live_mode_without_allow_switch_is_rejected() -> None:
     with pytest.raises(ValidationError, match="禁止 live"):
         Settings(trading_mode=TradingMode.LIVE)
 
