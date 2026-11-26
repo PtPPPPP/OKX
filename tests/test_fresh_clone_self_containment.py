@@ -19,12 +19,7 @@ _VWAP_FIXTURES = _TESTS / "fixtures" / "vwap"
 # References to the production database path are allowed only for tests that
 # assert path-identity refusals or guarded immutability checks; they never
 # require the file to exist.
-_PRODUCTION_PATH_ALLOWLIST = {
-    "test_database_backup_restore.py": "path-identity refusal checks only",
-    "test_legacy_quarantine.py": "negative guard: constructing a service on the production path must fail",
-    "test_vwap_shadow.py": "existence-guarded before/after immutability check",
-    "test_vwap_shadow_soak.py": "existence-guarded before/after immutability check",
-}
+_PRODUCTION_PATH_ALLOWLIST: dict[str, str] = {}
 
 _FORBIDDEN_LITERALS = (
     "data/btc_usdt",
@@ -37,9 +32,6 @@ _FORBIDDEN_LITERALS = (
 _FIXTURE_SHA256 = {
     "btc_usdt_1h_600.csv": ("d931461c41d28ab8748aa51a637488e08ddf86540c1303370f98545d0571960c"),
     "btc_usdt_1h_live.csv": ("472e4dc1c88a389bf26097b0390ecfd8d45c9cc96f7d468903d5ae80501843ed"),
-    "vwap_baseline_v1_signals.csv": (
-        "4bdffcd8dfabb5993c66c55121d303671a3623bc8834e370cec8aee002f8bb9e"
-    ),
 }
 
 _SECRET_MARKERS = (
