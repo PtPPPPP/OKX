@@ -52,3 +52,10 @@ data:
 
 output:
   directory: data/results/btc_ma_bollinger_live
+
+monitoring:
+  alerts_enabled: true
+  provider: wecom
+  min_level: info
+  timeout_seconds: 3.0
+

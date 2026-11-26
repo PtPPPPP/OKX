@@ -24,6 +24,11 @@
   2. 所有 OKX 私有请求固定发送 `x-simulated-trading: 1`；
   3. 唯一 `clOrdId` + 网络超时标记 `UNKNOWN` 落库，禁止盲目重发；
   4. 启动先同步账户与挂单、执行前后强制 `reconcile_private_state` 对账，风控否决权不可绕过。
+- **机构级执行与组合扩展**：
+  - **交易所端条件算法止损单（Exchange-Side Algo Stop-Loss）**：买入成交且策略信号携带 `stop_price` 时，自动向 OKX `/api/v5/trade/order-algo` 挂载服务端条件触发止损单（`triggerPxType=last`），平仓卖出前自动撤销在途条件止损单，防范本机断网/停机尾部风险。
+  - **多币种共享资金池组合引擎（Multi-Asset Shared-Equity Portfolio）**：支持 `market.instruments: ["BTC-USDT", "ETH-USDT", "SOL-USDT"]` 时间戳对齐步进回测（`portfolio-backtest`）与 `run-demo` / `run-live --loop` 多币种轮询守护，共享同一 `Portfolio` 现金池与 `RiskManager` 组合总敞口/日内亏损/最大回撤熔断。
+  - **BBO 微观盘口 Maker `POST_ONLY` 定价**：支持根据 OKX 实时最优买一/卖一（`bid_px` / `ask_px`）与 `maker_price_offset_bps` 自动贴盘口挂单，并以 `ordType="post_only"` 确保只做 Maker 不误吃 Taker 手续费。
+  - **企业微信（WeCom）实时 Webhook 告警推送**：通过 `EventBus` 事件驱动监听订单提交/成交/撤单、条件止损挂载、风控熔断拦截与对账漂移故障，支持 `INFO / WARNING / CRITICAL` 分级过滤、密钥自动脱敏与 `test-alert` 一键连通性测试。
 - **离线个人投研工具链**：每日交易参考日报、长周期现货持仓分析、Decimal 个人持仓台账、现货投资逻辑登记与复核、个人组合风险分析。
 
 ## 架构概览
@@ -125,6 +130,12 @@ uv run python -m app.cli run-live --config configs/btc_ma_bollinger_live.yaml --
 ```powershell
 uv run python -m app.cli query-demo-order <CLIENT_ORDER_ID> --config configs/btc_ma_demo.yaml
 uv run python -m app.cli cancel-demo-order <CLIENT_ORDER_ID> --config configs/btc_ma_demo.yaml --confirm-demo-cancellation
+```
+
+测试企业微信（WeCom）群机器人实时告警推送（需在 `.env` 配置 `ALERT_WEBHOOK_URL` 或通过 `--webhook-url` 传入）：
+
+```powershell
+uv run python -m app.cli test-alert --config configs/btc_ma_bollinger_live.yaml
 ```
 
 ## 个人投研与风险管理工具

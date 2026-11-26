@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
@@ -29,6 +31,10 @@ class EventBus:
         self._events: list[DomainEvent] = []
         self._seen: dict[str, str] = {}
         self._store = store
+        self._listeners: list[Callable[[DomainEvent], Any]] = []
+
+    def subscribe(self, listener: Callable[[DomainEvent], Any]) -> None:
+        self._listeners.append(listener)
 
     def publish(self, event: DomainEvent) -> bool:
         key = event.idempotency_key or event.event_id
@@ -51,6 +57,9 @@ class EventBus:
             # seen-mark alone preserves idempotent de-duplication semantics.
             self._seen[key] = ""
         self._events.append(event)
+        for listener in self._listeners:
+            with contextlib.suppress(Exception):
+                listener(event)
         return True
 
     @staticmethod

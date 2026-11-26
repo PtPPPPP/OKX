@@ -20,6 +20,7 @@ from app.market.providers import (
     OKXHistoricalDataProvider,
 )
 from app.market.websocket import OKXPublicWebSocketProvider
+from app.monitoring.alerts import WeComAlertNotifier
 from app.position_sizing.fixed_notional import create_position_sizer
 from app.reproducibility import (
     InstrumentSnapshotStore,
@@ -280,6 +281,20 @@ def build_demo_evaluation_session(
         clock = BacktestClock(confirmed[0].timestamp)
         portfolio_source = StaticPortfolioSource(sync.portfolio)
         event_bus = EventBus(repository)
+        webhook_url = settings.alert_webhook_url.get_secret_value().strip()
+        if webhook_url and (config.monitoring.alerts_enabled or webhook_url):
+            notifier = WeComAlertNotifier(
+                webhook_url,
+                provider=config.monitoring.provider,
+                min_level=config.monitoring.min_level,
+                timeout_seconds=config.monitoring.timeout_seconds,
+                redact_values=(
+                    settings.okx_api_key.get_secret_value(),
+                    settings.okx_secret_key.get_secret_value(),
+                    settings.okx_passphrase.get_secret_value(),
+                ),
+            )
+            event_bus.subscribe(notifier.handle_event)
         target_env = (
             TradingEnvironment.LIVE if config.mode is TradingMode.LIVE else TradingEnvironment.DEMO
         )

@@ -138,6 +138,13 @@ class OutputConfig(StrictModel):
     directory: Path = Path("data/results")
 
 
+class MonitoringConfig(StrictModel):
+    alerts_enabled: bool = False
+    provider: Literal["wecom", "feishu", "generic"] = "wecom"
+    min_level: Literal["info", "warning", "critical"] = "info"
+    timeout_seconds: float = Field(default=3.0, gt=0, le=30.0)
+
+
 class RunConfig(StrictModel):
     mode: TradingMode = TradingMode.BACKTEST
     exchange: ExchangeConfig = Field(default_factory=ExchangeConfig)
@@ -149,6 +156,7 @@ class RunConfig(StrictModel):
     backtest: BacktestConfig = Field(default_factory=BacktestConfig)
     data: DataConfig = Field(default_factory=DataConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
+    monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
 
     @model_validator(mode="after")
     def validate_safety(self) -> RunConfig:

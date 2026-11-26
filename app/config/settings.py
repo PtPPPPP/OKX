@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     okx_api_key: SecretStr = SecretStr("")
     okx_secret_key: SecretStr = SecretStr("")
     okx_passphrase: SecretStr = SecretStr("")
+    alert_webhook_url: SecretStr = SecretStr("")
     database_url: str = "sqlite:///data/trading.db"
     log_level: str = "INFO"
 
@@ -111,12 +112,15 @@ class Settings(BaseSettings):
         )
 
     def safe_dict(self) -> dict[str, Any]:
-        data = self.model_dump(exclude={"okx_api_key", "okx_secret_key", "okx_passphrase"})
+        data = self.model_dump(
+            exclude={"okx_api_key", "okx_secret_key", "okx_passphrase", "alert_webhook_url"}
+        )
         data.update(
             {
                 "okx_api_key": self._masked(self.okx_api_key),
                 "okx_secret_key": self._masked(self.okx_secret_key),
                 "okx_passphrase": self._masked(self.okx_passphrase),
+                "alert_webhook_url": self._masked(self.alert_webhook_url),
             }
         )
         return data

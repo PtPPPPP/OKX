@@ -23,6 +23,7 @@ from app.domain.order import Order
 from app.exchange.exceptions import ExchangeError
 from app.exchange.okx_client import OkxClient
 from app.market.historical_data import load_candles_csv, save_candles_csv
+from app.monitoring.alerts import WeComAlertNotifier
 from app.monitoring.logging_config import configure_logging
 from app.runtime.clock import SystemClock
 from app.services.demo_orders import DemoOrderService
@@ -654,6 +655,55 @@ def cancel_demo_order(
         session.close()
         client.close()
     typer.echo(json.dumps(_order_summary(order), ensure_ascii=False))
+
+
+@app.command("test-alert")
+def test_alert(
+    config_path: Annotated[Path | None, typer.Option("--config")] = None,
+    webhook_url: Annotated[
+        str | None,
+        typer.Option(
+            "--webhook-url",
+            help="可选：显式指定企业微信 Webhook URL（默认读取环境变量 ALERT_WEBHOOK_URL）",
+        ),
+    ] = None,
+) -> None:
+    config, settings = _load("test-alert", config_path)
+    target_url = (webhook_url or settings.alert_webhook_url.get_secret_value()).strip()
+    if not target_url:
+        _fail(
+            "未配置企业微信 Webhook 地址：请在 .env 中设置 ALERT_WEBHOOK_URL 或传入 --webhook-url"
+        )
+    notifier = WeComAlertNotifier(
+        target_url,
+        provider=config.monitoring.provider,
+        min_level=config.monitoring.min_level,
+        timeout_seconds=config.monitoring.timeout_seconds,
+        redact_values=(
+            settings.okx_api_key.get_secret_value(),
+            settings.okx_secret_key.get_secret_value(),
+            settings.okx_passphrase.get_secret_value(),
+        ),
+    )
+    ok = notifier.send_test_alert(
+        instrument_id=config.market.instrument_id,
+        strategy_name=config.strategy.name,
+        mode=config.mode.value,
+    )
+    if not ok:
+        _fail("企业微信 Webhook 告警推送失败，请检查机器人 Webhook URL 与网络连接")
+    typer.echo(
+        json.dumps(
+            {
+                "ok": True,
+                "provider": config.monitoring.provider,
+                "instrument_id": config.market.instrument_id,
+                "strategy": config.strategy.name,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":
